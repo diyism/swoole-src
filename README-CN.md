@@ -2,15 +2,17 @@
 
 # Swoole
 
-[![Latest Version](https://img.shields.io/github/release/swoole/swoole-src.svg)](https://github.com/swoole/swoole-src/releases)
+[![Latest Version](https://img.shields.io/github/release/swoole/swoole-src.svg?style=flat-square)](https://github.com/swoole/swoole-src/releases)
 [![Build Status](https://api.travis-ci.org/swoole/swoole-src.svg)](https://travis-ci.org/swoole/swoole-src)
 [![License](https://img.shields.io/badge/license-apache2-blue.svg)](LICENSE)
+[![Join the chat at https://gitter.im/swoole/swoole-src](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/swoole/swoole-src?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Coverity Scan Build Status](https://scan.coverity.com/projects/11654/badge.svg)](https://scan.coverity.com/projects/swoole-swoole-src)
-[![codecov](https://codecov.io/gh/swoole/swoole-src/branch/master/graph/badge.svg)](https://codecov.io/gh/swoole/swoole-src)
+[![Backers on Open Collective](https://opencollective.com/swoole-src/backers/badge.svg)](#backers) 
+[![Sponsors on Open Collective](https://opencollective.com/swoole-src/sponsors/badge.svg)](#sponsors) 
 
 ![](./mascot.png)
 
-**Swoole是一个C++编写的基于异步事件驱动和协程的并行网络通信引擎，为PHP提供高性能网络编程支持**
+**Swoole是一个为PHP用C和C++编写的基于事件的高性能异步&协程并行网络通信引擎**
 
 ## ✨事件驱动
 
@@ -309,7 +311,7 @@ Co\run(function() {
             }
         });
     }
-
+    
     // 10k file read and write
     for ($c = 100; $c--;) {
         go(function () use ($c) {
@@ -322,7 +324,7 @@ Co\run(function() {
             unlink($tmp_filename);
         });
     }
-
+    
     // 10k pdo and mysqli read
     for ($c = 50; $c--;) {
         go(function () {
@@ -346,18 +348,18 @@ Co\run(function() {
             }
         });
     }
-
+    
     // php_stream tcp server & client with 12.8k requests in single process
     function tcp_pack(string $data): string
     {
         return pack('n', strlen($data)) . $data;
     }
-
+    
     function tcp_length(string $head): int
     {
         return unpack('n', $head)[1];
     }
-
+    
     go(function () {
         $ctx = stream_context_create(['socket' => ['so_reuseaddr' => true, 'backlog' => 128]]);
         $socket = stream_socket_server(
@@ -398,7 +400,7 @@ Co\run(function() {
             }
         });
     }
-
+    
     // udp server & client with 12.8k requests in single process
     go(function () {
         $socket = new Swoole\Coroutine\Socket(AF_INET, SOCK_DGRAM, 0);
@@ -478,7 +480,7 @@ make && sudo make install
 
 ### 升级
 
->  ⚠️ 如果你要从源码升级, 别忘记在源码目录执行 `make clean`
+>  ⚠️ 如果你要从源码升级, 别忘记在源码目录执行 `make clean` 
 
 1. `pecl upgrade swoole`
 2. `git pull && cd swoole-src && make clean && make && sudo make install`
@@ -499,7 +501,6 @@ make && sudo make install
 + __中文文档__: <https://wiki.swoole.com>
 + __Document__: <https://www.swoole.co.uk/docs>
 + __IDE Helper & API__: <https://github.com/swoole/ide-helper>
-+ __调试工具__: <https://github.com/swoole/yasd>
 + __中文社区及QQ群__: <https://wiki.swoole.com/#/other/discussion>
 + __Twitter__: <https://twitter.com/php_swoole>
 + __Slack Group__: <https://swoole.slack.com>
@@ -507,7 +508,7 @@ make && sudo make install
 ## 🍭 性能测试
 
 + 在开源的 [Techempower Web Framework benchmarks](https://www.techempower.com/benchmarks/#section=data-r17) 压测平台上，Swoole使用MySQL数据库压测的成绩一度位居首位， 所有IO性能测试都位列第一梯队。
-+ 你可以直接运行 [Benchmark Script](https://github.com/swoole/benchmark/blob/master/benchmark.php) 来快速地测试出Swoole提供的Http服务在你的机器上所能达到的最大QPS
++ 你可以直接运行[Benchmark Script](./benchmark/benchmark.php)来快速地测试出Swoole提供的Http服务在你的机器上所能达到的最大QPS
 
 ## 🔰️ 安全问题
 

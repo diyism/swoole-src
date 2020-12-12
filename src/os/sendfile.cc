@@ -15,33 +15,35 @@
 */
 
 #include "swoole.h"
+
 #ifdef HAVE_KQUEUE
-#include <sys/socket.h>
+
 #include <sys/uio.h>
 
-int swoole_sendfile(int out_fd, int in_fd, off_t *offset, size_t size) {
-    ssize_t ret;
+int swoole_sendfile(int out_fd, int in_fd, off_t *offset, size_t size)
+{
+    int ret;
 
 #ifdef __MACH__
     struct sf_hdtr hdtr;
-    hdtr.headers = nullptr;
+    hdtr.headers = NULL;
     hdtr.hdr_cnt = 0;
-    hdtr.trailers = nullptr;
+    hdtr.trailers = NULL;
     hdtr.trl_cnt = 0;
 #else
     off_t sent_bytes;
 #endif
 
-_do_sendfile:
+
+    _do_sendfile:
 #ifdef __MACH__
     ret = sendfile(in_fd, out_fd, *offset, (off_t *) &size, &hdtr, 0);
 #else
     ret = sendfile(in_fd, out_fd, *offset, size, 0, &sent_bytes, 0);
 #endif
 
-    // sent_bytes = (off_t)size;
-    swTrace(
-        "send file, ret:%d, out_fd:%d, in_fd:%d, offset:%jd, size:%zu", ret, out_fd, in_fd, (intmax_t) *offset, size);
+    //sent_bytes = (off_t)size;
+    swTrace("send file, ret:%d, out_fd:%d, in_fd:%d, offset:%jd, size:%zu", ret, out_fd, in_fd, (intmax_t) *offset, size);
 
 #ifdef __MACH__
     *offset += size;
@@ -49,35 +51,52 @@ _do_sendfile:
     *offset += sent_bytes;
 #endif
 
-    if (ret == -1) {
-        if (errno == EINTR) {
+    if (ret == -1)
+    {
+        if (errno == EINTR)
+        {
             goto _do_sendfile;
-        } else {
+        }
+        else
+        {
             return ret;
         }
-    } else if (ret == 0) {
+    }
+    else if (ret == 0)
+    {
         return size;
-    } else {
+    }
+    else
+    {
         swSysWarn("sendfile failed");
         return SW_ERR;
     }
     return SW_OK;
 }
 #elif !defined(HAVE_SENDFILE)
-int swoole_sendfile(int out_fd, int in_fd, off_t *offset, size_t size) {
+int swoole_sendfile(int out_fd, int in_fd, off_t *offset, size_t size)
+{
     char buf[SW_BUFFER_SIZE_BIG];
-    size_t readn = size > sizeof(buf) ? sizeof(buf) : size;
-    ssize_t n = pread(in_fd, buf, readn, *offset);
+    int readn = size > sizeof(buf) ? sizeof(buf) : size;
 
-    if (n > 0) {
-        ssize_t ret = write(out_fd, buf, n);
-        if (ret < 0) {
+    int ret;
+    int n = pread(in_fd, buf, readn, *offset);
+
+    if (n > 0)
+    {
+        ret = write(out_fd, buf, n);
+        if (ret < 0)
+        {
             swSysWarn("write() failed");
-        } else {
+        }
+        else
+        {
             *offset += ret;
         }
         return ret;
-    } else {
+    }
+    else
+    {
         swSysWarn("pread() failed");
         return SW_ERR;
     }

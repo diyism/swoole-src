@@ -56,7 +56,7 @@ $pm->childFunc = function () use ($pm) {
         fwrite($socket[0], $serv->worker_id . "\n");
     });
     $serv->on(Constant::EVENT_PIPE_MESSAGE, function (Server $serv, $workerId, $msg) {
-        Assert::true($serv->close($msg['close_fd']));
+        $serv->close($msg['close_fd']);
     });
     $serv->start();
 };

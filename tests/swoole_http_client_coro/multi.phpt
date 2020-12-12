@@ -31,10 +31,9 @@ go(function () {
 
     $ret1 = ($cli1->get('/'));
     $ret2 = ($cli2->get('/'));
-    if (!$ret1 or !$ret2)    {
+    if (!$ret1 or !$ret2)
+    {
         echo "ERROR\n";
-        var_dump($cli1->errCode, $cli1->errMsg);
-        var_dump($cli2->errCode, $cli2->errMsg);
     }
     else
     {

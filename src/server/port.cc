@@ -14,301 +14,308 @@
   +----------------------------------------------------------------------+
 */
 
-#include "swoole_server.h"
-#include "swoole_http.h"
-#include "swoole_http2.h"
-#include "swoole_websocket.h"
-#include "swoole_mqtt.h"
-#include "swoole_redis.h"
+#include "server.h"
+#include "http.h"
+#include "http2.h"
+#include "websocket.h"
+#include "mqtt.h"
+#include "redis.h"
 
-using swoole::http_server::Request;
-using swoole::network::Socket;
-using swoole::network::Address;
+static int swPort_onRead_raw(swReactor *reactor, swListenPort *lp, swEvent *event);
+static int swPort_onRead_check_length(swReactor *reactor, swListenPort *lp, swEvent *event);
+static int swPort_onRead_check_eof(swReactor *reactor, swListenPort *lp, swEvent *event);
+static int swPort_onRead_http(swReactor *reactor, swListenPort *lp, swEvent *event);
+static int swPort_onRead_redis(swReactor *reactor, swListenPort *lp, swEvent *event);
 
-namespace swoole {
+void swPort_init(swListenPort *port)
+{
+    port->socket = nullptr;
+    port->ssl = 0;
 
-static int Port_onRead_raw(Reactor *reactor, ListenPort *lp, Event *event);
-static int Port_onRead_check_length(Reactor *reactor, ListenPort *lp, Event *event);
-static int Port_onRead_check_eof(Reactor *reactor, ListenPort *lp, Event *event);
-static int Port_onRead_http(Reactor *reactor, ListenPort *lp, Event *event);
-static int Port_onRead_redis(Reactor *reactor, ListenPort *lp, Event *event);
+    //listen backlog
+    port->backlog = SW_BACKLOG;
+    //tcp keepalive
+    port->tcp_keepcount = SW_TCP_KEEPCOUNT;
+    port->tcp_keepinterval = SW_TCP_KEEPINTERVAL;
+    port->tcp_keepidle = SW_TCP_KEEPIDLE;
+    port->open_tcp_nopush = 1;
 
-ListenPort::ListenPort() {
-    protocol.package_length_type = 'N';
-    protocol.package_length_size = 4;
-    protocol.package_body_offset = 4;
-    protocol.package_max_length = SW_INPUT_BUFFER_SIZE;
+    port->protocol.package_length_type = 'N';
+    port->protocol.package_length_size = 4;
+    port->protocol.package_body_offset = 4;
+    port->protocol.package_max_length = SW_INPUT_BUFFER_SIZE;
 
-    protocol.package_eof_len = sizeof(SW_DATA_EOF) - 1;
-    memcpy(protocol.package_eof, SW_DATA_EOF, protocol.package_eof_len);
+    port->socket_buffer_size = SwooleG.socket_buffer_size;
+
+    char eof[] = SW_DATA_EOF;
+    port->protocol.package_eof_len = sizeof(SW_DATA_EOF) - 1;
+    memcpy(port->protocol.package_eof, eof, port->protocol.package_eof_len);
 }
 
 #ifdef SW_USE_OPENSSL
-
-bool ListenPort::ssl_add_sni_cert(const std::string &name, SSLContext *ctx) {
-    if (!ssl_create_context(ctx)) {
-        return false;
-    }
-    sni_contexts.emplace(name, std::shared_ptr<SSLContext>(ctx));
-    return true;
-}
-
-static bool ssl_matches_wildcard_name(const char *subjectname, const char *certname) /* {{{ */
+int swPort_enable_ssl_encrypt(swListenPort *ls)
 {
-    const char *wildcard = NULL;
-    ptrdiff_t prefix_len;
-    size_t suffix_len, subject_len;
-
-    if (strcasecmp(subjectname, certname) == 0) {
-        return 1;
-    }
-
-    /* wildcard, if present, must only be present in the left-most component */
-    if (!(wildcard = strchr(certname, '*')) || memchr(certname, '.', wildcard - certname)) {
-        return 0;
-    }
-
-    /* 1) prefix, if not empty, must match subject */
-    prefix_len = wildcard - certname;
-    if (prefix_len && strncasecmp(subjectname, certname, prefix_len) != 0) {
-        return 0;
-    }
-
-    suffix_len = strlen(wildcard + 1);
-    subject_len = strlen(subjectname);
-    if (suffix_len <= subject_len) {
-        /* 2) suffix must match
-         * 3) no . between prefix and suffix
-         **/
-        return strcasecmp(wildcard + 1, subjectname + subject_len - suffix_len) == 0 &&
-            memchr(subjectname + prefix_len, '.', subject_len - suffix_len - prefix_len) == NULL;
-    }
-
-    return 0;
-}
-
-static int ssl_server_sni_callback(SSL *ssl, int *al, void *arg) {
-    const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-    if (!server_name) {
-        return SSL_TLSEXT_ERR_NOACK;
-    }
-
-    ListenPort *port = (ListenPort *) SSL_get_ex_data(ssl, swSSL_get_ex_port_index());
-
-    if (port->sni_contexts.empty()) {
-        return SSL_TLSEXT_ERR_NOACK;
-    }
-
-    for (auto i = port->sni_contexts.begin(); i != port->sni_contexts.end(); i++) {
-        if (ssl_matches_wildcard_name(server_name, i->first.c_str())) {
-            SSL_set_SSL_CTX(ssl, i->second->get_context());
-            return SSL_TLSEXT_ERR_OK;
-        }
-    }
-
-    return SSL_TLSEXT_ERR_NOACK;
-}
-
-bool ListenPort::ssl_init() {
-    if (!ssl_create_context(ssl_context)) {
-        return false;
-    }
-    if (sni_contexts.size() > 0) {
-        SSL_CTX_set_tlsext_servername_callback(ssl_context->get_context(), ssl_server_sni_callback);
-    }
-    return true;
-}
-
-bool ListenPort::ssl_create(Connection *conn, Socket *sock) {
-    if (sock->ssl_create(ssl_context, SW_SSL_SERVER) < 0) {
-        return false;
-    }
-    conn->ssl = 1;
-    if (SSL_set_ex_data(sock->ssl, swSSL_get_ex_port_index(), this) == 0) {
-        swWarn("SSL_set_ex_data() failed");
-        return false;
-    }
-    return true;
-}
-
-bool ListenPort::ssl_create_context(SSLContext *context) {
-    if (context->cert_file.empty() || context->key_file.empty()) {
+    if (ls->ssl_option.cert_file == NULL || ls->ssl_option.key_file == NULL)
+    {
         swWarn("SSL error, require ssl_cert_file and ssl_key_file");
-        return false;
+        return SW_ERR;
     }
-    if (open_http_protocol) {
-        context->http = 1;
-    }
-    if (open_http2_protocol) {
-        context->http_v2 = 1;
-    }
-    if (!context->create()) {
+    ls->ssl_context = swSSL_get_context(&ls->ssl_option);
+    if (ls->ssl_context == NULL)
+    {
         swWarn("swSSL_get_context() error");
-        return false;
+        return SW_ERR;
     }
-    return true;
+    if (ls->ssl_option.client_cert_file
+            && swSSL_set_client_certificate(ls->ssl_context, ls->ssl_option.client_cert_file,
+                    ls->ssl_option.verify_depth) == SW_ERR)
+    {
+        swWarn("swSSL_set_client_certificate() error");
+        return SW_ERR;
+    }
+    if (ls->open_http_protocol)
+    {
+        ls->ssl_config.http = 1;
+    }
+    if (ls->open_http2_protocol)
+    {
+        ls->ssl_config.http_v2 = 1;
+        swSSL_server_http_advise(ls->ssl_context, &ls->ssl_config);
+    }
+    if (swSSL_server_set_cipher(ls->ssl_context, &ls->ssl_config) < 0)
+    {
+        swWarn("swSSL_server_set_cipher() error");
+        return SW_ERR;
+    }
+    return SW_OK;
 }
 #endif
 
-int ListenPort::listen() {
-    // listen stream socket
-    if (!listening && socket->listen(backlog) < 0) {
-        swSysWarn("listen(%s:%d, %d) failed", host.c_str(), port, backlog);
+int swPort_listen(swListenPort *ls)
+{
+    int sock = ls->socket->fd;
+    int option = 1;
+
+    //listen stream socket
+    if (listen(sock, ls->backlog) < 0)
+    {
+        swSysWarn("listen(%s:%d, %d) failed", ls->host, ls->port, ls->backlog);
         return SW_ERR;
     }
-    listening = true;
 
 #ifdef TCP_DEFER_ACCEPT
-    if (tcp_defer_accept) {
-        if (socket->set_option(IPPROTO_TCP, TCP_DEFER_ACCEPT, tcp_defer_accept) != 0) {
+    if (ls->tcp_defer_accept)
+    {
+        if (setsockopt(sock, IPPROTO_TCP, TCP_DEFER_ACCEPT, (const void*) &ls->tcp_defer_accept, sizeof(int)) != 0)
+        {
             swSysWarn("setsockopt(TCP_DEFER_ACCEPT) failed");
         }
     }
 #endif
 
 #ifdef TCP_FASTOPEN
-    if (tcp_fastopen) {
-        if (socket->set_option(IPPROTO_TCP, TCP_FASTOPEN, tcp_fastopen) != 0) {
+    if (ls->tcp_fastopen)
+    {
+        if (setsockopt(sock, IPPROTO_TCP, TCP_FASTOPEN, (const void*) &ls->tcp_fastopen, sizeof(int)) != 0)
+        {
             swSysWarn("setsockopt(TCP_FASTOPEN) failed");
         }
     }
 #endif
 
 #ifdef SO_KEEPALIVE
-    if (open_tcp_keepalive == 1) {
-        if (socket->set_option(SOL_SOCKET, SO_KEEPALIVE, 1) != 0) {
+    if (ls->open_tcp_keepalive == 1)
+    {
+        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (void *) &option, sizeof(option)) != 0)
+        {
             swSysWarn("setsockopt(SO_KEEPALIVE) failed");
         }
 #ifdef TCP_KEEPIDLE
-        if (socket->set_option(IPPROTO_TCP, TCP_KEEPIDLE, tcp_keepidle) < 0) {
-            swSysWarn("setsockopt(TCP_KEEPIDLE) failed");
-        }
-        if (socket->set_option(IPPROTO_TCP, TCP_KEEPINTVL, tcp_keepinterval) < 0) {
-            swSysWarn("setsockopt(TCP_KEEPINTVL) failed");
-        }
-        if (socket->set_option(IPPROTO_TCP, TCP_KEEPCNT, tcp_keepcount) < 0) {
-            swSysWarn("setsockopt(TCP_KEEPCNT) failed");
-        }
-#endif
-#ifdef TCP_USER_TIMEOUT
-        if (tcp_user_timeout > 0 && socket->set_option(IPPROTO_TCP, TCP_USER_TIMEOUT, tcp_user_timeout) != 0) {
-            swSysWarn("setsockopt(TCP_USER_TIMEOUT) failed");
-        }
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, (void*) &ls->tcp_keepidle, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, (void *) &ls->tcp_keepinterval, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, (void *) &ls->tcp_keepcount, sizeof(int));
 #endif
     }
 #endif
 
-    buffer_high_watermark = socket_buffer_size * 0.8;
-    buffer_low_watermark = 0;
+    ls->buffer_high_watermark = ls->socket_buffer_size * 0.8;
+    ls->buffer_low_watermark = 0;
 
     return SW_OK;
 }
 
-void Server::init_port_protocol(ListenPort *ls) {
-    ls->protocol.private_data_2 = this;
-    // Thread mode must copy the data.
-    // will free after onFinish
-    if (ls->open_eof_check) {
-        if (ls->protocol.package_eof_len > SW_DATA_EOF_MAXLEN) {
+void swPort_set_protocol(swServer *serv, swListenPort *ls)
+{
+    ls->protocol.private_data_2 = serv;
+    //Thread mode must copy the data.
+    //will free after onFinish
+    if (ls->open_eof_check)
+    {
+        if (ls->protocol.package_eof_len > SW_DATA_EOF_MAXLEN)
+        {
             ls->protocol.package_eof_len = SW_DATA_EOF_MAXLEN;
         }
-        ls->protocol.onPackage = Server::dispatch_task;
-        ls->onRead = Port_onRead_check_eof;
-    } else if (ls->open_length_check) {
-        if (ls->protocol.package_length_type != '\0') {
-            ls->protocol.get_package_length = Protocol::default_length_func;
+        ls->protocol.onPackage = swReactorThread_dispatch;
+        ls->onRead = swPort_onRead_check_eof;
+    }
+    else if (ls->open_length_check)
+    {
+        if (ls->protocol.package_length_type != '\0')
+        {
+            ls->protocol.get_package_length = swProtocol_get_package_length;
         }
-        ls->protocol.onPackage = Server::dispatch_task;
-        ls->onRead = Port_onRead_check_length;
-    } else if (ls->open_http_protocol) {
+        ls->protocol.onPackage = swReactorThread_dispatch;
+        ls->onRead = swPort_onRead_check_length;
+    }
+    else if (ls->open_http_protocol)
+    {
 #ifdef SW_USE_HTTP2
-        if (ls->open_http2_protocol && ls->open_websocket_protocol) {
+        if (ls->open_http2_protocol && ls->open_websocket_protocol)
+        {
             ls->protocol.get_package_length = swHttpMix_get_package_length;
             ls->protocol.get_package_length_size = swHttpMix_get_package_length_size;
             ls->protocol.onPackage = swHttpMix_dispatch_frame;
-        } else if (ls->open_http2_protocol) {
+        }
+        else if (ls->open_http2_protocol)
+        {
             ls->protocol.package_length_size = SW_HTTP2_FRAME_HEADER_SIZE;
             ls->protocol.get_package_length = swHttp2_get_frame_length;
-            ls->protocol.onPackage = Server::dispatch_task;
-        } else
+            ls->protocol.onPackage = swReactorThread_dispatch;
+        }
+        else
 #endif
-            if (ls->open_websocket_protocol) {
+        if (ls->open_websocket_protocol)
+        {
             ls->protocol.package_length_size = SW_WEBSOCKET_HEADER_LEN + SW_WEBSOCKET_MASK_LEN + sizeof(uint64_t);
             ls->protocol.get_package_length = swWebSocket_get_package_length;
             ls->protocol.onPackage = swWebSocket_dispatch_frame;
         }
         ls->protocol.package_length_offset = 0;
         ls->protocol.package_body_offset = 0;
-        ls->onRead = Port_onRead_http;
-    } else if (ls->open_mqtt_protocol) {
+        ls->onRead = swPort_onRead_http;
+    }
+    else if (ls->open_mqtt_protocol)
+    {
         swMqtt_set_protocol(&ls->protocol);
-        ls->protocol.onPackage = Server::dispatch_task;
-        ls->onRead = Port_onRead_check_length;
-    } else if (ls->open_redis_protocol) {
-        ls->protocol.onPackage = Server::dispatch_task;
-        ls->onRead = Port_onRead_redis;
-    } else {
-        ls->onRead = Port_onRead_raw;
+        ls->protocol.onPackage = swReactorThread_dispatch;
+        ls->onRead = swPort_onRead_check_length;
+    }
+    else if (ls->open_redis_protocol)
+    {
+        ls->protocol.onPackage = swReactorThread_dispatch;
+        ls->onRead = swPort_onRead_redis;
+    }
+    else
+    {
+        ls->onRead = swPort_onRead_raw;
     }
 }
 
 /**
- * @description: import listen port from socket-fd
+ * @description: set the swListenPort.host and swListenPort.port in swListenPort from sock
  */
-bool ListenPort::import(int sock) {
-    int _type, _family;
+int swPort_set_address(swListenPort *ls, int sock)
+{
+    socklen_t optlen;
+    swSocketAddress address;
+    int sock_type, sock_family;
+    char tmp[INET6_ADDRSTRLEN];
 
-    socket = new Socket();
-    socket->fd = sock;
-    
-    // get socket type
-    if (socket->get_option(SOL_SOCKET, SO_TYPE, &_type) < 0) {
-        swSysWarn("getsockopt(%d, SOL_SOCKET, SO_TYPE) failed", sock);
-        return false;
+    //get socket type
+    optlen = sizeof(sock_type);
+    if (getsockopt(sock, SOL_SOCKET, SO_TYPE, &sock_type, &optlen) < 0)
+    {
+        swWarn("getsockopt(%d, SOL_SOCKET, SO_TYPE) failed", sock);
+        return -1;
     }
-    if (socket->get_name(&socket->info) < 0) {
-        swSysWarn("getsockname(%d) failed", sock);
-        return false;
+    //get socket family
+#ifndef SO_DOMAIN
+    swWarn("no getsockopt(SO_DOMAIN) supports");
+    return -1;
+#else
+    optlen = sizeof(sock_family);
+    if (getsockopt(sock, SOL_SOCKET, SO_DOMAIN, &sock_family, &optlen) < 0)
+    {
+        swWarn("getsockopt(%d, SOL_SOCKET, SO_DOMAIN) failed", sock);
+        return -1;
     }
-
-    _family = socket->info.addr.ss.sa_family;
-    socket->socket_type = socket->info.type = type = Socket::convert_to_type(_family, _type);
-    host = socket->info.get_addr();
-    port = socket->info.get_port();
-    listening = true;
-
-    socket->fd_type = socket->is_dgram() ? SW_FD_DGRAM_SERVER : SW_FD_STREAM_SERVER;
-    socket->removed = 1;
-
-    return true;
-}
-
-void ListenPort::clear_protocol() {
-    open_eof_check = 0;
-    open_length_check = 0;
-    open_http_protocol = 0;
-    open_websocket_protocol = 0;
-#ifdef SW_USE_HTTP2
-    open_http2_protocol = 0;
 #endif
-    open_mqtt_protocol = 0;
-    open_redis_protocol = 0;
-}
 
-static int Port_onRead_raw(Reactor *reactor, ListenPort *port, Event *event) {
-    ssize_t n;
-    Socket *_socket = event->socket;
-    Connection *conn = (Connection *) _socket->object;
-    Server *serv = (Server *) reactor->ptr;
-
-    String *buffer = serv->get_recv_buffer(_socket);
-    if (!buffer) {
-        return SW_ERR;
+    //get address info
+    address.len = sizeof(address.addr);
+    if (getsockname(sock, (struct sockaddr*) &address.addr, &address.len) < 0)
+    {
+        swWarn("getsockname(%d) failed", sock);
+        return -1;
     }
 
-    n = _socket->recv(buffer->str, buffer->size, 0);
-    if (n < 0) {
-        switch (_socket->catch_error(errno)) {
+    swPort_init(ls);
+
+    switch (sock_family)
+    {
+    case AF_INET:
+        if (sock_type == SOCK_STREAM)
+        {
+            ls->type = SW_SOCK_TCP;
+        }
+        else
+        {
+            ls->type = SW_SOCK_UDP;
+        }
+        ls->port = ntohs(address.addr.inet_v4.sin_port);
+        strncpy(ls->host, inet_ntoa(address.addr.inet_v4.sin_addr), SW_HOST_MAXSIZE - 1);
+        break;
+    case AF_INET6:
+        if (sock_type == SOCK_STREAM)
+        {
+            ls->type = SW_SOCK_TCP6;
+        }
+        else
+        {
+            ls->type = SW_SOCK_UDP6;
+        }
+        ls->port = ntohs(address.addr.inet_v6.sin6_port);
+        inet_ntop(AF_INET6, &address.addr.inet_v6.sin6_addr, tmp, sizeof(tmp));
+        strncpy(ls->host, tmp, SW_HOST_MAXSIZE - 1);
+        break;
+    case AF_UNIX:
+        ls->type = sock_type == SOCK_STREAM ? SW_SOCK_UNIX_STREAM : SW_SOCK_UNIX_DGRAM;
+        ls->port = 0;
+        strncpy(ls->host, address.addr.un.sun_path, SW_HOST_MAXSIZE);
+        break;
+    default:
+        swWarn("Unknown socket family[%d]", sock_family);
+        break;
+    }
+
+    return 0;
+}
+
+void swPort_clear_protocol(swListenPort *ls)
+{
+    ls->open_eof_check = 0;
+    ls->open_length_check = 0;
+    ls->open_http_protocol = 0;
+    ls->open_websocket_protocol = 0;
+#ifdef SW_USE_HTTP2
+    ls->open_http2_protocol = 0;
+#endif
+    ls->open_mqtt_protocol = 0;
+    ls->open_redis_protocol = 0;
+}
+
+static int swPort_onRead_raw(swReactor *reactor, swListenPort *port, swEvent *event)
+{
+    ssize_t n;
+    swSocket *_socket = event->socket;
+    swConnection *conn = (swConnection *) _socket->object;
+    char *buffer = SwooleTG.buffer_stack->str;
+
+    n = swSocket_recv(_socket, buffer, SwooleTG.buffer_stack->size, 0);
+    if (n < 0)
+    {
+        switch (swSocket_error(errno))
+        {
         case SW_ERROR:
             swSysWarn("recv from connection#%d failed", event->fd);
             return SW_OK;
@@ -318,96 +325,107 @@ static int Port_onRead_raw(Reactor *reactor, ListenPort *port, Event *event) {
         default:
             return SW_OK;
         }
-    } else if (n == 0) {
-    _close_fd:
-        reactor->trigger_close_event(event);
+    }
+    else if (n == 0)
+    {
+        _close_fd:
+        swReactor_trigger_close_event(reactor, event);
         return SW_OK;
-    } else {
-        buffer->offset = buffer->length = n;
-        return Server::dispatch_task(&port->protocol, _socket, buffer->str, n);
+    }
+    else
+    {
+        return swReactorThread_dispatch(&port->protocol, _socket, buffer, n);
     }
 }
 
-static int Port_onRead_check_length(Reactor *reactor, ListenPort *port, Event *event) {
-    Socket *_socket = event->socket;
-    Connection *conn = (Connection *) _socket->object;
-    Protocol *protocol = &port->protocol;
-    Server *serv = (Server *) reactor->ptr;
+static int swPort_onRead_check_length(swReactor *reactor, swListenPort *port, swEvent *event)
+{
+    swSocket *_socket = event->socket;
+    swConnection *conn = (swConnection *) _socket->object;
+    swProtocol *protocol = &port->protocol;
 
-    String *buffer = serv->get_recv_buffer(_socket);
-    if (!buffer) {
-        reactor->trigger_close_event(event);
+    swString *buffer = swSocket_get_buffer(_socket);
+    if (!buffer)
+    {
         return SW_ERR;
     }
 
-    if (protocol->recv_with_length_protocol(_socket, buffer) < 0) {
+    if (swProtocol_recv_check_length(protocol, _socket, buffer) < 0)
+    {
         swTrace("Close Event.FD=%d|From=%d", event->fd, event->reactor_id);
         conn->close_errno = errno;
-        reactor->trigger_close_event(event);
-    }
-
-    /**
-     * if the length is 0, which means the onPackage has been called, we can free the buffer.
-     */
-    if (_socket->recv_buffer && _socket->recv_buffer->length == 0 &&
-        _socket->recv_buffer->size > SW_BUFFER_SIZE_BIG * 2) {
-        delete _socket->recv_buffer;
-        _socket->recv_buffer = nullptr;
+        swReactor_trigger_close_event(reactor, event);
     }
 
     return SW_OK;
 }
 
-#define CLIENT_INFO_FMT " from session#%ld on %s:%d"
-#define CLIENT_INFO_ARGS conn->session_id, port->host.c_str(), port->port
+#define CLIENT_INFO_FMT " from session#%u on %s:%d"
+#define CLIENT_INFO_ARGS conn->session_id, port->host, port->port
 
 /**
  * For Http Protocol
  */
-static int Port_onRead_http(Reactor *reactor, ListenPort *port, Event *event) {
-    Socket *_socket = event->socket;
-    Connection *conn = (Connection *) _socket->object;
-    Server *serv = (Server *) reactor->ptr;
+static int swPort_onRead_http(swReactor *reactor, swListenPort *port, swEvent *event)
+{
+    swSocket *_socket = event->socket;
+    swConnection *conn = (swConnection *) _socket->object;
+    swServer *serv = (swServer *) reactor->ptr;
 
-    if (conn->websocket_status >= WEBSOCKET_STATUS_HANDSHAKE) {
-        if (conn->http_upgrade == 0) {
-            serv->destroy_http_request(conn);
+    if (conn->websocket_status >= WEBSOCKET_STATUS_HANDSHAKE)
+    {
+        if (conn->http_upgrade == 0)
+        {
+            swHttpRequest_free(conn);
             conn->websocket_status = WEBSOCKET_STATUS_ACTIVE;
             conn->http_upgrade = 1;
         }
-        return Port_onRead_check_length(reactor, port, event);
+        return swPort_onRead_check_length(reactor, port, event);
     }
 
 #ifdef SW_USE_HTTP2
-    if (conn->http2_stream) {
-        return Port_onRead_check_length(reactor, port, event);
+    if (conn->http2_stream)
+    {
+        return swPort_onRead_check_length(reactor, port, event);
     }
 #endif
 
-    Request *request = nullptr;
-    Protocol *protocol = &port->protocol;
+    swHttpRequest *request = NULL;
+    swProtocol *protocol = &port->protocol;
 
-    if (conn->object == nullptr) {
-        request = new Request();
+    if (conn->object == NULL)
+    {
+        request = (swHttpRequest *) sw_calloc(1, sizeof(swHttpRequest));
+        if (!request)
+        {
+            swWarn("calloc(%ld) failed", sizeof(swHttpRequest));
+            return SW_ERR;
+        }
         conn->object = request;
-    } else {
-        request = reinterpret_cast<Request *>(conn->object);
+    }
+    else
+    {
+        request = (swHttpRequest *) conn->object;
     }
 
-    if (!request->buffer_) {
-        request->buffer_ = serv->get_recv_buffer(_socket);
-        if (!request->buffer_) {
-            reactor->trigger_close_event(event);
+    if (!request->buffer)
+    {
+        request->buffer = swString_new(SW_HTTP_HEADER_MAX_SIZE);
+        if (!request->buffer)
+        {
+            swReactor_trigger_close_event(reactor, event);
             return SW_ERR;
         }
     }
 
-    String *buffer = request->buffer_;
+    swString *buffer = request->buffer;
 
-_recv_data:
-    ssize_t n = _socket->recv(buffer->str + buffer->length, buffer->size - buffer->length, 0);
-    if (n < 0) {
-        switch (_socket->catch_error(errno)) {
+    _recv_data:
+    ssize_t n = swSocket_recv(_socket, buffer->str + buffer->length, buffer->size - buffer->length, 0);
+    if (n < 0)
+    {
+        switch (swSocket_error(errno))
+        {
         case SW_ERROR:
             swSysWarn("recv from connection#%d failed", event->fd);
             return SW_OK;
@@ -419,84 +437,90 @@ _recv_data:
         }
     }
 
-    if (n == 0) {
-        if (0) {
-        _bad_request:
+    if (n == 0)
+    {
+        if (0)
+        {
+            _bad_request:
 #ifdef SW_HTTP_BAD_REQUEST_PACKET
-            _socket->send(SW_STRL(SW_HTTP_BAD_REQUEST_PACKET), 0);
+            swSocket_send(_socket, SW_STRL(SW_HTTP_BAD_REQUEST_PACKET), 0);
 #endif
         }
-        if (0) {
-        _too_large:
+        if (0)
+        {
+            _too_large:
 #ifdef SW_HTTP_REQUEST_ENTITY_TOO_LARGE_PACKET
-            _socket->send(SW_STRL(SW_HTTP_REQUEST_ENTITY_TOO_LARGE_PACKET), 0);
+            swSocket_send(_socket, SW_STRL(SW_HTTP_REQUEST_ENTITY_TOO_LARGE_PACKET), 0);
 #endif
         }
-        if (0) {
-        _unavailable:
+        if (0)
+        {
+            _unavailable:
 #ifdef SW_HTTP_SERVICE_UNAVAILABLE_PACKET
-            _socket->send(SW_STRL(SW_HTTP_SERVICE_UNAVAILABLE_PACKET), 0);
+            swSocket_send(_socket, SW_STRL(SW_HTTP_SERVICE_UNAVAILABLE_PACKET), 0);
 #endif
         }
-    _close_fd:
-        serv->destroy_http_request(conn);
-        reactor->trigger_close_event(event);
+        _close_fd:
+        swHttpRequest_free(conn);
+        swReactor_trigger_close_event(reactor, event);
         return SW_OK;
     }
 
     buffer->length += n;
 
-_parse:
-    if (request->method == 0 && request->get_protocol() < 0) {
-        if (!request->excepted && buffer->length < SW_HTTP_HEADER_MAX_SIZE) {
+    _parse:
+    if (request->method == 0 && swHttpRequest_get_protocol(request) < 0)
+    {
+        if (!request->excepted && buffer->length < SW_HTTP_HEADER_MAX_SIZE)
+        {
             return SW_OK;
         }
-        swoole_error_log(SW_LOG_TRACE,
-                         SW_ERROR_HTTP_INVALID_PROTOCOL,
-                         "Bad Request: unknown protocol" CLIENT_INFO_FMT,
-                         CLIENT_INFO_ARGS);
+        swoole_error_log(SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL, "Bad Request: unknown protocol" CLIENT_INFO_FMT, CLIENT_INFO_ARGS);
         goto _bad_request;
     }
 
-    if (request->method > SW_HTTP_PRI) {
-        swoole_error_log(SW_LOG_TRACE,
-                         SW_ERROR_HTTP_INVALID_PROTOCOL,
-                         "Bad Request: unknown HTTP method" CLIENT_INFO_FMT,
-                         CLIENT_INFO_ARGS);
+    if (request->method > SW_HTTP_PRI)
+    {
+        swoole_error_log(SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL, "Bad Request: got unsupported HTTP method" CLIENT_INFO_FMT, CLIENT_INFO_ARGS);
         goto _bad_request;
-    } else if (request->method == SW_HTTP_PRI) {
+    }
+    else if (request->method == SW_HTTP_PRI)
+    {
 #ifdef SW_USE_HTTP2
-        if (sw_unlikely(!port->open_http2_protocol)) {
+        if (sw_unlikely(!port->open_http2_protocol))
+        {
 #endif
-            swoole_error_log(SW_LOG_TRACE,
-                             SW_ERROR_HTTP_INVALID_PROTOCOL,
-                             "Bad Request: can not handle HTTP2 request" CLIENT_INFO_FMT,
-                             CLIENT_INFO_ARGS);
+            swoole_error_log(SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL, "Bad Request: can not handle HTTP2 request" CLIENT_INFO_FMT, CLIENT_INFO_ARGS);
             goto _bad_request;
 #ifdef SW_USE_HTTP2
         }
         conn->http2_stream = 1;
         swHttp2_send_setting_frame(protocol, _socket);
-        if (buffer->length == sizeof(SW_HTTP2_PRI_STRING) - 1) {
-            serv->destroy_http_request(conn);
-            buffer->clear();
+        if (buffer->length == sizeof(SW_HTTP2_PRI_STRING) - 1)
+        {
+            swHttpRequest_free(conn);
             return SW_OK;
         }
-        buffer->reduce(buffer->offset);
-        serv->destroy_http_request(conn);
+        swString *h2_buffer = swSocket_get_buffer(_socket);
+        if (!h2_buffer)
+        {
+            goto _close_fd;
+        }
+        swString_append_ptr(h2_buffer, buffer->str + buffer->offset, buffer->length - buffer->offset);
+        swHttpRequest_free(conn);
         conn->socket->skip_recv = 1;
-        return Port_onRead_check_length(reactor, port, event);
+        return swPort_onRead_check_length(reactor, port, event);
 #endif
     }
 
     // http header is not the end
-    if (request->header_length_ == 0) {
-        if (request->get_header_length() < 0) {
-            if (buffer->size == buffer->length) {
-                swoole_error_log(SW_LOG_TRACE,
-                                 SW_ERROR_HTTP_INVALID_PROTOCOL,
-                                 "Bad Request: request header size is too large" CLIENT_INFO_FMT,
-                                 CLIENT_INFO_ARGS);
+    if (request->header_length == 0)
+    {
+        if (swHttpRequest_get_header_length(request) < 0)
+        {
+            if (buffer->size == buffer->length)
+            {
+                swoole_error_log(SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL, "Bad Request: request header is too long" CLIENT_INFO_FMT, CLIENT_INFO_ARGS);
                 goto _bad_request;
             }
             goto _recv_data;
@@ -504,212 +528,213 @@ _parse:
     }
 
     // parse http header and got http body length
-    if (!request->header_parsed) {
-        request->parse_header_info();
-        swTraceLog(SW_TRACE_SERVER,
-                   "content-length=%u, keep-alive=%u, chunked=%u",
-                   request->content_length_,
-                   request->keep_alive,
-                   request->chunked);
+    if (!request->header_parsed)
+    {
+        swHttpRequest_parse_header_info(request);
+        swTraceLog(SW_TRACE_SERVER, "content-length=%u, keep-alive=%u, chunked=%u", request->content_length, request->keep_alive, request->chunked);
     }
 
     // content length (equal to 0) or (field not found but not chunked)
-    if (!request->tried_to_dispatch) {
+    if (!request->tried_to_dispatch)
+    {
         // recv nobody_chunked eof
-        if (request->nobody_chunked) {
-            if (buffer->length < request->header_length_ + (sizeof("0\r\n\r\n") - 1)) {
+        if (request->nobody_chunked)
+        {
+            if (buffer->length < request->header_length + (sizeof("0\r\n\r\n") - 1))
+            {
                 goto _recv_data;
             }
-            request->header_length_ += (sizeof("0\r\n\r\n") - 1);
+            request->header_length += (sizeof("0\r\n\r\n") - 1);
         }
         request->tried_to_dispatch = 1;
         // (know content-length is equal to 0) or (no content-length field and no chunked)
-        if (request->content_length_ == 0 && (request->known_length || !request->chunked)) {
-            buffer->offset = request->header_length_;
+        if (request->content_length == 0 && (request->known_length || !request->chunked))
+        {
             // send static file content directly in the reactor thread
-            if (!serv->enable_static_handler || !serv->select_static_handler(request, conn)) {
+            if (!serv->enable_static_handler || !swServer_http_static_handler_hit(serv, request, conn))
+            {
                 // dynamic request, dispatch to worker
-                Server::dispatch_task(protocol, _socket, buffer->str, request->header_length_);
+                swReactorThread_dispatch(protocol, _socket, buffer->str, request->header_length);
             }
-            if (!conn->active || _socket->removed) {
-                return SW_OK;
-            }
-            if (buffer->length > request->header_length_) {
+            if (conn->active && buffer->length > request->header_length)
+            {
                 // http pipeline, multi requests, parse the next one
-                buffer->reduce(request->header_length_);
-                request->clean();
+                swString_pop_front(buffer, request->header_length);
+                swHttpRequest_clean(request);
                 goto _parse;
-            } else {
-                serv->destroy_http_request(conn);
-                buffer->clear();
+            }
+            else
+            {
+                swHttpRequest_free(conn);
                 return SW_OK;
             }
         }
     }
 
     size_t request_length;
-    if (request->chunked) {
+    if (request->chunked)
+    {
         /* unknown length, should find chunked eof */
-        if (request->get_chunked_body_length() < 0) {
-            if (request->excepted) {
-                swoole_error_log(SW_LOG_TRACE,
-                                 SW_ERROR_HTTP_INVALID_PROTOCOL,
-                                 "Bad Request: protocol error when parse chunked length" CLIENT_INFO_FMT,
-                                 CLIENT_INFO_ARGS);
+        if (swHttpRequest_get_chunked_body_length(request) < 0)
+        {
+            if (request->excepted)
+            {
+                swoole_error_log(SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL, "Bad Request: protocol error when parse chunked length" CLIENT_INFO_FMT, CLIENT_INFO_ARGS);
                 goto _bad_request;
             }
-            request_length = request->header_length_ + request->content_length_;
-            if (request_length > protocol->package_max_length) {
-                swoole_error_log(SW_LOG_TRACE,
-                                 SW_ERROR_HTTP_INVALID_PROTOCOL,
-                                 "Request Entity Too Large: request length (chunked) has already been greater than the "
-                                 "package_max_length(%u)" CLIENT_INFO_FMT,
-                                 protocol->package_max_length,
-                                 CLIENT_INFO_ARGS);
+            request_length = request->header_length + request->content_length;
+            if (request_length > protocol->package_max_length)
+            {
+                swoole_error_log(
+                    SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL,
+                    "Request Entity Too Large: request length (chunked) has already been greater than the package_max_length(%u)" CLIENT_INFO_FMT,
+                    protocol->package_max_length, CLIENT_INFO_ARGS
+                );
                 goto _too_large;
             }
-            if (buffer->length == buffer->size && !buffer->extend()) {
+            if (buffer->length == buffer->size && swString_extend(buffer, buffer->size * 2) < 0)
+            {
                 goto _unavailable;
             }
-            if (request_length > buffer->size && !buffer->extend_align(request_length)) {
+            if (request_length > buffer->size && swString_extend_align(buffer, request_length) < 0)
+            {
                 goto _unavailable;
             }
             goto _recv_data;
-        } else {
-            request_length = request->header_length_ + request->content_length_;
         }
-        swTraceLog(SW_TRACE_SERVER, "received chunked eof, real content-length=%u", request->content_length_);
-    } else {
-        request_length = request->header_length_ + request->content_length_;
-        if (request_length > protocol->package_max_length) {
-            swoole_error_log(SW_LOG_TRACE,
-                             SW_ERROR_HTTP_INVALID_PROTOCOL,
-                             "Request Entity Too Large: header-length (%u) + content-length (%u) is greater than the "
-                             "package_max_length(%u)" CLIENT_INFO_FMT,
-                             request->header_length_,
-                             request->content_length_,
-                             protocol->package_max_length,
-                             CLIENT_INFO_ARGS);
+        else
+        {
+            request_length = request->header_length + request->content_length;
+        }
+        swTraceLog(SW_TRACE_SERVER, "received chunked eof, real content-length=%u", request->content_length);
+    }
+    else
+    {
+        request_length = request->header_length + request->content_length;
+        if (request_length > protocol->package_max_length)
+        {
+            swoole_error_log(
+                SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL,
+                "Request Entity Too Large: header-length (%u) + content-length (%u) is greater than the package_max_length(%u)" CLIENT_INFO_FMT,
+                request->header_length, request->content_length, protocol->package_max_length, CLIENT_INFO_ARGS
+            );
             goto _too_large;
         }
 
-        if (request_length > buffer->size && !buffer->extend(request_length)) {
+        if (request_length > buffer->size && swString_extend(buffer, request_length) < 0)
+        {
             goto _unavailable;
         }
 
-        if (buffer->length < request_length) {
-#ifdef SW_HTTP_100_CONTINUE
+        if (buffer->length < request_length)
+        {
+    #ifdef SW_HTTP_100_CONTINUE
             // Expect: 100-continue
-            if (request->has_expect_header()) {
-                _socket->send(SW_STRL(SW_HTTP_100_CONTINUE_PACKET), 0);
-            } else {
-                swTraceLog(SW_TRACE_SERVER,
-                           "PostWait: request->content_length=%d, buffer->length=%zu, request->header_length=%d\n",
-                           request->content_length,
-                           buffer_->length,
-                           request->header_length);
+            if (swHttpRequest_has_expect_header(request))
+            {
+                swSocket_send(_socket, SW_STRL(SW_HTTP_100_CONTINUE_PACKET), 0);
             }
-#endif
+            else
+            {
+                swTraceLog(
+                    SW_TRACE_SERVER, "PostWait: request->content_length=%d, buffer->length=%zu, request->header_length=%d\n",
+                    request->content_length, buffer->length, request->header_length
+                );
+            }
+    #endif
             goto _recv_data;
         }
     }
 
     // discard the redundant data
-    if (buffer->length > request_length) {
-        swoole_error_log(SW_LOG_TRACE,
-                         SW_ERROR_HTTP_INVALID_PROTOCOL,
-                         "Invalid Request: %zu bytes has been disacard" CLIENT_INFO_FMT,
-                         buffer->length - request_length,
-                         CLIENT_INFO_ARGS);
+    if (buffer->length > request_length)
+    {
+        swoole_error_log(
+            SW_LOG_TRACE, SW_ERROR_HTTP_INVALID_PROTOCOL,
+            "Invalid Request: %zu bytes has been disacard" CLIENT_INFO_FMT,
+            buffer->length - request_length, CLIENT_INFO_ARGS
+        );
         buffer->length = request_length;
     }
 
-    buffer->offset = request_length;
-    Server::dispatch_task(protocol, _socket, buffer->str, buffer->length);
-
-    if (conn->active && !_socket->removed) {
-        serv->destroy_http_request(conn);
-        if (_socket->recv_buffer && _socket->recv_buffer->size > SW_BUFFER_SIZE_BIG * 2) {
-            delete _socket->recv_buffer;
-            _socket->recv_buffer = nullptr;
-        } else {
-            buffer->clear();
-        }
-    }
+    swReactorThread_dispatch(protocol, _socket, buffer->str, buffer->length);
+    swHttpRequest_free(conn);
 
     return SW_OK;
 }
 
-static int Port_onRead_redis(Reactor *reactor, ListenPort *port, Event *event) {
-    Socket *_socket = event->socket;
-    Connection *conn = (Connection *) _socket->object;
-    Protocol *protocol = &port->protocol;
-    Server *serv = (Server *) reactor->ptr;
+static int swPort_onRead_redis(swReactor *reactor, swListenPort *port, swEvent *event)
+{
+    swSocket *_socket = event->socket;
+    swConnection *conn = (swConnection *) _socket->object;
+    swProtocol *protocol = &port->protocol;
 
-    String *buffer = serv->get_recv_buffer(_socket);
-    if (!buffer) {
-        reactor->trigger_close_event(event);
+    swString *buffer = swSocket_get_buffer(_socket);
+    if (!buffer)
+    {
         return SW_ERR;
     }
 
-    if (swRedis_recv_packet(protocol, conn, buffer) < 0) {
+    if (swRedis_recv(protocol, conn, buffer) < 0)
+    {
         conn->close_errno = errno;
-        reactor->trigger_close_event(event);
+        swReactor_trigger_close_event(reactor, event);
     }
 
     return SW_OK;
 }
 
-static int Port_onRead_check_eof(Reactor *reactor, ListenPort *port, Event *event) {
-    Socket *_socket = event->socket;
-    Connection *conn = (Connection *) _socket->object;
-    Protocol *protocol = &port->protocol;
-    Server *serv = (Server *) reactor->ptr;
+static int swPort_onRead_check_eof(swReactor *reactor, swListenPort *port, swEvent *event)
+{
+    swSocket *_socket = event->socket;
+    swConnection *conn = (swConnection *) _socket->object;
+    swProtocol *protocol = &port->protocol;
 
-    String *buffer = serv->get_recv_buffer(_socket);
-    if (!buffer) {
-        reactor->trigger_close_event(event);
+    swString *buffer = swSocket_get_buffer(_socket);
+    if (!buffer)
+    {
         return SW_ERR;
     }
 
-    if (protocol->recv_with_eof_protocol(_socket, buffer) < 0) {
+    if (swProtocol_recv_check_eof(protocol, _socket, buffer) < 0)
+    {
         conn->close_errno = errno;
-        reactor->trigger_close_event(event);
-    }
-
-    // If the length is 0, which means the onPackage has been called, we can free the buffer.
-    if (_socket->recv_buffer && _socket->recv_buffer->length == 0 &&
-        _socket->recv_buffer->size > SW_BUFFER_SIZE_BIG * 2) {
-        delete _socket->recv_buffer;
-        _socket->recv_buffer = nullptr;
+        swReactor_trigger_close_event(reactor, event);
     }
 
     return SW_OK;
 }
 
-void ListenPort::close() {
+void swPort_free(swListenPort *port)
+{
 #ifdef SW_USE_OPENSSL
-    if (ssl) {
-        if (ssl_context) {
-            delete ssl_context;
+    if (port->ssl)
+    {
+        if (port->ssl_context)
+        {
+            swSSL_free_context(port->ssl_context);
+        }
+        sw_free(port->ssl_option.cert_file);
+        sw_free(port->ssl_option.key_file);
+        if (port->ssl_option.client_cert_file)
+        {
+            sw_free(port->ssl_option.client_cert_file);
         }
 #ifdef SW_SUPPORT_DTLS
-        if (dtls_sessions) {
-            delete dtls_sessions;
+        if (port->dtls_sessions)
+        {
+            delete port->dtls_sessions;
         }
 #endif
     }
 #endif
 
-    if (socket) {
-        socket->free();
-        socket = nullptr;
-    }
+    swSocket_free(port->socket);
 
-    // remove unix socket file
-    if (type == SW_SOCK_UNIX_STREAM || type == SW_SOCK_UNIX_DGRAM) {
-        unlink(host.c_str());
+    //remove unix socket file
+    if (port->type == SW_SOCK_UNIX_STREAM || port->type == SW_SOCK_UNIX_DGRAM)
+    {
+        unlink(port->host);
     }
 }
 
-}

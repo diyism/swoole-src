@@ -68,39 +68,9 @@ function get_one_free_port(): int
 {
     $hookFlags = Swoole\Runtime::getHookFlags();
     Swoole\Runtime::enableCoroutine(false);
-    $server = @stream_socket_server('tcp://127.0.0.1:0');
-    if (!$server) {
-        $port = -1;
-    } else {
-        $name = stream_socket_get_name($server, false);
-        if (empty($name)) {
-            $port = -1;
-        }
-        else {
-            $port = (parse_url($name)['port'] ?? -1) ?: -1;
-        }
-    }
-    Swoole\Runtime::enableCoroutine($hookFlags);
-    return $port;
-}
-
-function get_one_free_port_ipv6(): int
-{
-    $hookFlags = Swoole\Runtime::getHookFlags();
-    Swoole\Runtime::enableCoroutine(false);
-    $server = @stream_socket_server('tcp://[::1]:0');
-    if (!$server) {
-        $port = -1;
-    } else {
-        $name = stream_socket_get_name($server, false);
-        if (empty($name)) {
-            $port = -1;
-        }
-        else {
-            $port = explode(']:', $name)[1];
-        }
-    }
-
+    $server = stream_socket_server('tcp://127.0.0.1:0');
+    $name = stream_socket_get_name($server, false);
+    $port = (parse_url($name)['port'] ?? -1) ?: -1;
     Swoole\Runtime::enableCoroutine($hookFlags);
     return $port;
 }
@@ -158,20 +128,6 @@ function phpt_var_dump(...$args)
     if (substr($argv[0], -5) === '.phpt') {
         var_dump(...$args);
     }
-}
-
-function httpPost($url, $data)
-{
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_HEADER, 0);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Expect:'));
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    $res = curl_exec($ch);
-    curl_close($ch);
-    return $res;
 }
 
 function httpRequest(string $uri, array $options = [])

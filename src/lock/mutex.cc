@@ -15,92 +15,76 @@
 */
 
 #include "swoole.h"
-#include "swoole_lock.h"
 
-namespace swoole {
+static int swMutex_lock(swLock *lock);
+static int swMutex_unlock(swLock *lock);
+static int swMutex_trylock(swLock *lock);
+static int swMutex_free(swLock *lock);
 
-struct MutexImpl {
-    pthread_mutex_t lock_;
-    pthread_mutexattr_t attr_;
-};
-
-Mutex::Mutex(int flags) : Lock() {
-    if (flags & PROCESS_SHARED) {
-        impl = (MutexImpl *) sw_mem_pool()->alloc(sizeof(*impl));
-        if (impl == nullptr) {
-            throw std::bad_alloc();
-        }
-        shared_ = true;
-    } else {
-        impl = new MutexImpl();
-        shared_ = false;
+int swMutex_create(swLock *lock, int use_in_process)
+{
+    int ret;
+    bzero(lock, sizeof(swLock));
+    lock->type = SW_MUTEX;
+    pthread_mutexattr_init(&lock->object.mutex.attr);
+    if (use_in_process == 1)
+    {
+        pthread_mutexattr_setpshared(&lock->object.mutex.attr, PTHREAD_PROCESS_SHARED);
     }
-
-    type_ = MUTEX;
-    pthread_mutexattr_init(&impl->attr_);
-
-    if (flags & PROCESS_SHARED) {
-        pthread_mutexattr_setpshared(&impl->attr_, PTHREAD_PROCESS_SHARED);
+    if ((ret = pthread_mutex_init(&lock->object.mutex._lock, &lock->object.mutex.attr)) < 0)
+    {
+        return SW_ERR;
     }
-
-    if (flags & ROBUST) {
-#ifdef HAVE_PTHREAD_MUTEXATTR_SETROBUST
-        pthread_mutexattr_setrobust(&impl->attr_, PTHREAD_MUTEX_ROBUST);
-#else
-        swWarn("PTHREAD_MUTEX_ROBUST is not supported");
-#endif
-    }
-
-    if (pthread_mutex_init(&impl->lock_, &impl->attr_) < 0) {
-        throw std::system_error(errno, std::generic_category(), "pthread_mutex_init() failed");
-    }
+    lock->lock = swMutex_lock;
+    lock->unlock = swMutex_unlock;
+    lock->trylock = swMutex_trylock;
+    lock->free = swMutex_free;
+    return SW_OK;
 }
 
-int Mutex::lock() {
-    int retval = pthread_mutex_lock(&impl->lock_);
-#ifdef HAVE_PTHREAD_MUTEX_CONSISTENT
-    if (retval == EOWNERDEAD) {
-        retval = pthread_mutex_consistent(&impl->lock_);
-    }
-#endif
-    return retval;
+static int swMutex_lock(swLock *lock)
+{
+    return pthread_mutex_lock(&lock->object.mutex._lock);
 }
 
-int Mutex::lock_rd() {
-    return lock();
+static int swMutex_unlock(swLock *lock)
+{
+    return pthread_mutex_unlock(&lock->object.mutex._lock);
 }
 
-int Mutex::unlock() {
-    return pthread_mutex_unlock(&impl->lock_);
-}
-
-int Mutex::trylock() {
-    return pthread_mutex_trylock(&impl->lock_);
-}
-
-int Mutex::trylock_rd() {
-    return trylock();
+static int swMutex_trylock(swLock *lock)
+{
+    return pthread_mutex_trylock(&lock->object.mutex._lock);
 }
 
 #ifdef HAVE_MUTEX_TIMEDLOCK
-int Mutex::lock_wait(int timeout_msec) {
-    struct timespec timeo = swoole_time_until(timeout_msec);
-    return pthread_mutex_timedlock(&impl->lock_, &timeo);
+int swMutex_lockwait(swLock *lock, int timeout_msec)
+{
+    struct timespec timeo;
+    timeo.tv_sec = timeout_msec / 1000;
+    timeo.tv_nsec = (timeout_msec - timeo.tv_sec * 1000) * 1000 * 1000;
+    return pthread_mutex_timedlock(&lock->object.mutex._lock, &timeo);
 }
 #else
-int Mutex::lock_wait(int timeout_msec) {
+int swMutex_lockwait(swLock *lock, int timeout_msec)
+{
     int sub = 1;
     int sleep_ms = 1000;
 
-    if (timeout_msec > 100) {
+    if (timeout_msec > 100)
+    {
         sub = 10;
         sleep_ms = 10000;
     }
 
-    while (timeout_msec > 0) {
-        if (pthread_mutex_trylock(&impl->lock_) == 0) {
+    while( timeout_msec > 0)
+    {
+        if (pthread_mutex_trylock(&lock->object.mutex._lock) == 0)
+        {
             return 0;
-        } else {
+        }
+        else
+        {
             usleep(sleep_ms);
             timeout_msec -= sub;
         }
@@ -109,14 +93,8 @@ int Mutex::lock_wait(int timeout_msec) {
 }
 #endif
 
-Mutex::~Mutex() {
-    pthread_mutexattr_destroy(&impl->attr_);
-    pthread_mutex_destroy(&impl->lock_);
-    if (shared_) {
-        sw_mem_pool()->free(impl);
-    } else {
-        delete impl;
-    }
+static int swMutex_free(swLock *lock)
+{
+    pthread_mutexattr_destroy(&lock->object.mutex.attr);
+    return pthread_mutex_destroy(&lock->object.mutex._lock);
 }
-
-}  // namespace swoole

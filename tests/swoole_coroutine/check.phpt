@@ -92,15 +92,10 @@ $map = [
         Assert::assert(0); // never here
     },
 ];
-
-function pgsql_test() {
-    (new Co\Postgresql())->connect('host=127.0.0.1 port=12345 dbname=test user=root password=root');
-    Assert::assert(0); // never here
-}
-
 if (class_exists(Co\Postgresql::class)) {
     $map[] = function () {
-        pgsql_test();
+        (new Co\Postgresql())->connect('host=127.0.0.1 port=12345 dbname=test user=root password=root');
+        Assert::assert(0); // never here
     };
 }
 if (class_exists(Co\Http2\Client::class)) {
@@ -138,12 +133,12 @@ foreach ($map as $i => $f) {
     $info = $process->read(8192);
     $process::wait();
     if (Assert::contains($info, 'Swoole\\Error')) {
-        $_info = trim($info);
-        $_info = preg_replace('/(\#0.+?: )[^\n]+/', '$1%s', $_info, 1);
-        $_info = preg_replace('/(: )[^\n]+( in )/', '$1%s$2', $_info, 1);
-        $_info = preg_replace('/\/[^(:]+:?\(?\d+\)?/', '%s:%d', $_info);
-        $info_list[] = $_info;
-        if (!Assert::assert($info_list[0] === $_info)) {
+        $info = trim($info);
+        $info = preg_replace('/(\#0.+?: )[^\n]+/', '$1%s', $info, 1);
+        $info = preg_replace('/(: )[^\n]+( in )/', '$1%s$2', $info, 1);
+        $info = preg_replace('/\/[^(:]+:?\(?\d+\)?/', '%s:%d', $info);
+        $info_list[] = $info;
+        if (!Assert::assert($info_list[0] === $info)) {
             var_dump($map[$i]);
             var_dump($info_list[0]);
             var_dump($info);

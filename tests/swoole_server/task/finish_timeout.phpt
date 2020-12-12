@@ -32,7 +32,6 @@ $pm->childFunc = function () use ($pm) {
             'task_worker_num' => 1,
             'socket_send_timeout' => 1.0,
             'worker_num' => 1,
-            'enable_coroutine' => false,
         ]
     );
     $server->on('workerStart', function () use ($pm) {
@@ -63,5 +62,5 @@ $pm->run();
 unlink(TMP_LOG_FILE);
 ?>
 --EXPECTF--
-[%s]	WARNING	send_blocking(:%d): send %d bytes failed, Error: Resource temporarily unavailable[11]
-[%s]	WARNING	reply_task_result: TaskWorker: send result to worker timed out
+[%s]	WARNING	swSocket_write_blocking(:%d): write %d bytes failed, Error: Resource temporarily unavailable[11]
+[%s]	WARNING	swTaskWorker_finish(:%d): TaskWorker: send result to worker failed, Error: Resource temporarily unavailable[11]

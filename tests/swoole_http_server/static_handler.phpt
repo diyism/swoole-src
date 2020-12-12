@@ -54,7 +54,8 @@ $pm->childFunc = function () use ($pm) {
         'open_http2_protocol' => true,
         'enable_static_handler' => true,
         'document_root' => dirname(dirname(__DIR__)) . '/examples/',
-        'static_handler_locations' => ['/static', '/']
+        'static_file_types' => [],
+        'static_file_locations' => ['/static', '/']
     ]);
     $http->on('workerStart', function () use ($pm) {
         $pm->wakeup();

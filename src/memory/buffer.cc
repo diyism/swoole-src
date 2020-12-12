@@ -15,126 +15,177 @@
 */
 
 #include "swoole.h"
-#include "swoole_buffer.h"
-namespace swoole {
+#include "buffer.h"
 
-Buffer::Buffer(uint32_t _chunk_size) {
-    chunk_size = _chunk_size == 0 ? INT_MAX : _chunk_size;
+/**
+ * create new buffer
+ */
+swBuffer* swBuffer_new(uint32_t chunk_size)
+{
+    swBuffer *buffer = (swBuffer *) sw_malloc(sizeof(swBuffer));
+    if (buffer == NULL)
+    {
+        swSysWarn("malloc for buffer failed");
+        return NULL;
+    }
+
+    bzero(buffer, sizeof(swBuffer));
+    buffer->chunk_size = chunk_size == 0 ? INT_MAX : chunk_size;
+
+    return buffer;
 }
 
-BufferChunk *Buffer::alloc(BufferChunk::Type type, uint32_t size) {
-    BufferChunk *chunk = new BufferChunk();
+/**
+ * create new chunk
+ */
+swBuffer_chunk *swBuffer_new_chunk(swBuffer *buffer, uint32_t type, uint32_t size)
+{
+    swBuffer_chunk *chunk = (swBuffer_chunk *) sw_malloc(sizeof(swBuffer_chunk));
+    if (chunk == NULL)
+    {
+        swSysWarn("malloc for chunk failed");
+        return NULL;
+    }
 
-    if (type == BufferChunk::TYPE_DATA && size > 0) {
+    bzero(chunk, sizeof(swBuffer_chunk));
+
+    //require alloc memory
+    if (type == SW_CHUNK_DATA && size > 0)
+    {
+        void *buf = sw_malloc(size);
+        if (buf == NULL)
+        {
+            swSysWarn("malloc(%d) for data failed", size);
+            sw_free(chunk);
+            return NULL;
+        }
         chunk->size = size;
-        chunk->value.ptr = new char[size];
+        chunk->store.ptr = buf;
     }
 
     chunk->type = type;
-    queue_.push(chunk);
+    buffer->chunk_num ++;
+
+    if (buffer->head == NULL)
+    {
+        buffer->tail = buffer->head = chunk;
+    }
+    else
+    {
+        buffer->tail->next = chunk;
+        buffer->tail = chunk;
+    }
 
     return chunk;
 }
 
-void Buffer::pop() {
-    BufferChunk *chunk = queue_.front();
-
-    total_length -= chunk->size;
-    if (chunk->type == BufferChunk::TYPE_DATA) {
-        delete[] chunk->value.ptr;
+/**
+ * pop the head chunk
+ */
+void swBuffer_pop_chunk(swBuffer *buffer, swBuffer_chunk *chunk)
+{
+    if (chunk->next == NULL)
+    {
+        buffer->head = NULL;
+        buffer->tail = NULL;
+        buffer->length = 0;
+        buffer->chunk_num = 0;
     }
-    if (chunk->destroy) {
+    else
+    {
+        buffer->head = chunk->next;
+        buffer->length -= chunk->length;
+        buffer->chunk_num--;
+    }
+    if (chunk->type == SW_CHUNK_DATA)
+    {
+        sw_free(chunk->store.ptr);
+    }
+    if (chunk->destroy)
+    {
         chunk->destroy(chunk);
     }
-    delete chunk;
-    queue_.pop();
+    sw_free(chunk);
 }
 
-Buffer::~Buffer() {
-    while (!queue_.empty()) {
-        pop();
+/**
+ * free buffer
+ */
+int swBuffer_free(swBuffer *buffer)
+{
+    swBuffer_chunk *chunk = buffer->head;
+    swBuffer_chunk *will_free_chunk;  //free the point
+    while (chunk != NULL)
+    {
+        if (chunk->type == SW_CHUNK_DATA)
+        {
+            sw_free(chunk->store.ptr);
+        }
+        if (chunk->destroy)
+        {
+            chunk->destroy(chunk);
+        }
+        will_free_chunk = chunk;
+        chunk = chunk->next;
+        sw_free((void *) will_free_chunk);
     }
+    sw_free(buffer);
+    return SW_OK;
 }
 
-void Buffer::append(const void *data, uint32_t size) {
+/**
+ * append to buffer queue
+ */
+int swBuffer_append(swBuffer *buffer, const void *data, uint32_t size)
+{
     uint32_t _length = size;
-    char *_pos = (char *) data;
+    char* _pos = (char*) data;
     uint32_t _n;
 
-    // buffer enQueue
-    while (_length > 0) {
-        _n = _length >= chunk_size ? chunk_size : _length;
+    //buffer enQueue
+    while (_length > 0)
+    {
+        _n = _length >= buffer->chunk_size ? buffer->chunk_size : _length;
 
-        BufferChunk *chunk = alloc(BufferChunk::TYPE_DATA, _n);
+        swBuffer_chunk *chunk = swBuffer_new_chunk(buffer, SW_CHUNK_DATA, _n);
+        if (chunk == NULL)
+        {
+            return SW_ERR;
+        }
 
-        total_length += _n;
-
-        memcpy(chunk->value.ptr, _pos, _n);
+        buffer->length += _n;
         chunk->length = _n;
 
-        swTraceLog(SW_TRACE_BUFFER, "chunk_n=%lu|size=%u|chunk_len=%u|chunk=%p", count(), _n, chunk->length, chunk);
+        memcpy(chunk->store.ptr, _pos, _n);
+
+        swTraceLog(SW_TRACE_BUFFER, "chunk_n=%d|size=%d|chunk_len=%d|chunk=%p", buffer->chunk_num, _n,
+                chunk->length, chunk);
 
         _pos += _n;
         _length -= _n;
     }
+
+    return SW_OK;
 }
 
-void Buffer::append(const struct iovec *iov, size_t iovcnt, off_t offset) {
-    size_t _length = 0;
-
-    SW_LOOP_N(iovcnt) {
-        _length += iov[i].iov_len;
-    }
-
-    char *pos = (char *) iov[0].iov_base;
-    BufferChunk *chunk = nullptr;
-    size_t iov_remain_len = iov[0].iov_len, chunk_remain_len;
-    size_t i = 0;
-
-    while (true) {
-        if (chunk) {
-            if (chunk->size == chunk->length) {
-                chunk = nullptr;
-                continue;
-            } else {
-                chunk_remain_len = chunk->size - chunk->length;
-            }
-        } else {
-            if (offset > 0) {
-                if (offset >= (off_t) iov[i].iov_len) {
-                    offset -= iov[i].iov_len;
-                    i++;
-                    continue;
-                } else {
-                    offset = 0;
-                    pos += offset;
-                    iov_remain_len -= offset;
-                }
-            }
-            chunk_remain_len = _length >= chunk_size ? chunk_size : _length;
-            chunk = alloc(BufferChunk::TYPE_DATA, chunk_remain_len);
+/**
+ * print buffer
+ */
+void swBuffer_debug(swBuffer *buffer, int print_data)
+{
+    int i = 0;
+    volatile swBuffer_chunk *chunk = buffer->head;
+    printf("%s\n%s\n", SW_START_LINE, __func__);
+    while (chunk != NULL)
+    {
+        i++;
+        printf("%d.\tlen=%d", i, chunk->length);
+        if (print_data)
+        {
+            printf("\tdata=%s", (char *) chunk->store.ptr);
         }
-
-        size_t _n = std::min(iov_remain_len, chunk_remain_len);
-        memcpy(chunk->value.ptr + chunk->length, pos, _n);
-        total_length += _n;
-        _length -= _n;
-
-        swTraceLog(SW_TRACE_BUFFER, "chunk_n=%lu|size=%lu|chunk_len=%u|chunk=%p", count(), _n, chunk->length, chunk);
-
-        chunk->length += _n;
-        iov_remain_len -= _n;
-
-        if (iov_remain_len == 0) {
-            i++;
-            if (i == iovcnt) {
-                break;
-            }
-            iov_remain_len = iov[i].iov_len;
-            pos = (char *) iov[i].iov_base;
-        } else {
-            pos += _n;
-        }
+        printf("\n");
+        chunk = chunk->next;
     }
+    printf("%s\n%s\n", SW_END_LINE, __func__);
 }
-}  // namespace swoole

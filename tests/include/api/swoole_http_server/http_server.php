@@ -44,9 +44,10 @@ class HttpServer
             */
         ];
 
-        if ($ssl) {
-            $config['ssl_cert_file'] = SSL_FILE_DIR . '/server.crt';
-            $config['ssl_key_file'] = SSL_FILE_DIR . '/server.key';
+        if ($ssl)
+        {
+            $config['ssl_cert_file'] = __DIR__ . '/localhost-ssl/server.crt';
+            $config['ssl_key_file'] = __DIR__ . '/localhost-ssl/server.key';
         }
         $this->httpServ->set($config);
     }

@@ -2,15 +2,17 @@ English | [中文](./README-CN.md)
 
 # Swoole
 
-[![Latest Version](https://img.shields.io/github/release/swoole/swoole-src.svg)](https://github.com/swoole/swoole-src/releases)
+[![Latest Version](https://img.shields.io/github/release/swoole/swoole-src.svg?style=flat-square)](https://github.com/swoole/swoole-src/releases)
 [![Build Status](https://api.travis-ci.org/swoole/swoole-src.svg)](https://travis-ci.org/swoole/swoole-src)
 [![License](https://img.shields.io/badge/license-apache2-blue.svg)](LICENSE)
+[![Join the chat at https://gitter.im/swoole/swoole-src](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/swoole/swoole-src?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Coverity Scan Build Status](https://scan.coverity.com/projects/11654/badge.svg)](https://scan.coverity.com/projects/swoole-swoole-src)
-[![codecov](https://codecov.io/gh/swoole/swoole-src/branch/master/graph/badge.svg)](https://codecov.io/gh/swoole/swoole-src)
+[![Backers on Open Collective](https://opencollective.com/swoole-src/backers/badge.svg)](#backers) 
+[![Sponsors on Open Collective](https://opencollective.com/swoole-src/sponsors/badge.svg)](#sponsors) 
 
 ![](./mascot.png)
 
-**Swoole is an event-driven asynchronous & coroutine-based concurrency networking communication engine with high performance written in C++ for PHP.**
+**Swoole is an event-driven asynchronous & coroutine-based concurrency networking communication engine with high performance written in C and C++ for PHP.**
 
 ## ✨Event-based
 
@@ -303,7 +305,7 @@ Co\run(function() {
             }
         });
     }
-
+    
     // 10K file read and write
     for ($c = 100; $c--;) {
         go(function () use ($c) {
@@ -316,7 +318,7 @@ Co\run(function() {
             unlink($tmp_filename);
         });
     }
-
+    
     // 10K pdo and mysqli read
     for ($c = 50; $c--;) {
         go(function () {
@@ -340,18 +342,18 @@ Co\run(function() {
             }
         });
     }
-
+    
     // php_stream tcp server & client with 12.8K requests in single process
     function tcp_pack(string $data): string
     {
         return pack('n', strlen($data)) . $data;
     }
-
+    
     function tcp_length(string $head): int
     {
         return unpack('n', $head)[1];
     }
-
+    
     go(function () {
         $ctx = stream_context_create(['socket' => ['so_reuseaddr' => true, 'backlog' => 128]]);
         $socket = stream_socket_server(
@@ -392,7 +394,7 @@ Co\run(function() {
             }
         });
     }
-
+    
     // udp server & client with 12.8K requests in single process
     go(function () {
         $socket = new Swoole\Coroutine\Socket(AF_INET, SOCK_DGRAM, 0);
@@ -485,6 +487,7 @@ After compiling and installing to the system successfully, you have to add a new
 2. `git pull && cd swoole-src && make clean && make && sudo make install`
 3. if you change your PHP version, please re-run `phpize clean && phpize` then try to compile
 
+
 ### Major change since version 4.3.0
 
 Async clients and API are moved to a separate PHP extension `swoole_async` since version 4.3.0, install `swoole_async`:
@@ -514,7 +517,6 @@ Enable it by adding a new line `extension=swoole_async.so` to `php.ini`.
 + __中文文档__: <https://wiki.swoole.com>
 + __Documentation__: <https://www.swoole.co.uk/docs>
 + __IDE Helper & API__: <https://github.com/swoole/ide-helper>
-+ __Debug Tool__: <https://github.com/swoole/yasd>
 + __中文社区__: <https://wiki.swoole.com/#/other/discussion>
 + __Twitter__: <https://twitter.com/php_swoole>
 + __Slack Group__: <https://swoole.slack.com>
@@ -522,7 +524,7 @@ Enable it by adding a new line `extension=swoole_async.so` to `php.ini`.
 ## 🍭 Benchmark
 
 + On the open source [Techempower Web Framework benchmarks](https://www.techempower.com/benchmarks/#section=data-r17) Swoole used MySQL database benchmark to rank first, and all performance tests ranked in the first echelon.
-+ You can just run [Benchmark Script](https://github.com/swoole/benchmark/blob/master/benchmark.php) to quickly test the maximum QPS of Swoole-HTTP-Server on your machine.
++ You can just run [Benchmark Script](./benchmark/benchmark.php) to quickly test the maximum QPS of Swoole-HTTP-Server on your machine.
 
 ## 🔰️ Security issues
 

@@ -2,21 +2,18 @@
 <?php
 require __DIR__ . '/bootstrap.php';
 
-define('LIBRARY_HEADER', ROOT_DIR . '/ext-src/php_swoole_library.h');
+define('LIBRARY_HEADER', ROOT_DIR . '/php_swoole_library.h');
 define('PHP_TAG', '<?php');
 
-if (!isset($argv[1]) or $argv[1] != 'dev') {
-    preg_match(
-        '/^(\d+)/',
-        trim(shell_exec('cd ' . LIBRARY_DIR . ' && git diff --shortstat')),
-        $file_change
-    );
-    $file_change = (int) ($file_change[1] ?? 0);
-    if ($file_change > 0) {
-        swoole_error($file_change . ' file changed in [' . LIBRARY_DIR . ']');
-    }
+preg_match(
+    '/^(\d+)/',
+    trim(shell_exec('cd ' . LIBRARY_DIR . ' && git diff --shortstat')),
+    $file_change
+);
+$file_change = (int) ($file_change[1] ?? 0);
+if ($file_change > 0) {
+    swoole_error($file_change . ' file changed in [' . LIBRARY_DIR . ']');
 }
-
 $commit_id = trim(shell_exec('cd ' . LIBRARY_DIR . ' && git rev-parse HEAD'));
 if (!$commit_id || strlen($commit_id) != 40) {
     swoole_error('Unable to get commit id of library in [' . LIBRARY_DIR . ']');
@@ -32,13 +29,11 @@ $files = [
     'core/Constant.php',
     'core/StringObject.php',
     'core/MultibyteStringObject.php',
-    'core/Exception/ArrayKeyNotExists.php',
     'core/ArrayObject.php',
     'core/ObjectProxy.php',
     'core/Coroutine/WaitGroup.php',
     'core/Coroutine/Server.php',
     'core/Coroutine/Server/Connection.php',
-    'core/Coroutine/Barrier.php',
     # <core for connection pool> #
     'core/ConnectionPool.php',
     'core/Database/ObjectProxy.php',
@@ -81,25 +76,15 @@ $files = [
     'core/Coroutine/FastCGI/Client.php',
     'core/Coroutine/FastCGI/Client/Exception.php',
     'core/Coroutine/FastCGI/Proxy.php',
-    # <core for Process> #
-    'core/Process/Manager.php',
-    # <core for Server> #
-    'core/Server/Helper.php',
     # <core for functions> #
     'core/Coroutine/functions.php',
     # <ext> #
     'ext/curl.php',
-    'ext/sockets.php',
     # <finalizer> #
     'functions.php',
     'alias.php',
     'alias_ns.php',
 ];
-
-$diff_files = array_diff(swoole_library_files(), $files);
-if (!empty($diff_files)) {
-    swoole_error('Some files are not loaded: ', ...$diff_files);
-}
 
 foreach ($files as $file) {
     if (!file_exists(LIBRARY_SRC_DIR . '/' . $file)) {

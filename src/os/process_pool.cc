@@ -14,142 +14,182 @@
   +----------------------------------------------------------------------+
 */
 
-#include "swoole_api.h"
-#include "swoole_memory.h"
-#include "swoole_signal.h"
-#include "swoole_socket.h"
-#include "swoole_string.h"
-#include "swoole_msg_queue.h"
-#include "swoole_pipe.h"
-#include "swoole_server.h"
-#include "swoole_process_pool.h"
-#include "swoole_client.h"
-
-namespace swoole {
-
-using network::Socket;
-using network::Stream;
+#include "server.h"
+#include "client.h"
 
 /**
  * call onTask
  */
-static int ProcessPool_worker_loop(ProcessPool *pool, Worker *worker);
+static int swProcessPool_worker_loop(swProcessPool *pool, swWorker *worker);
 /**
  * call onMessage
  */
-static int ProcessPool_worker_loop_ex(ProcessPool *pool, Worker *worker);
+static int swProcessPool_worker_loop_ex(swProcessPool *pool, swWorker *worker);
 
-static void ProcessPool_kill_timeout_worker(Timer *timer, TimerNode *tnode) {
+static void swProcessPool_free(swProcessPool *pool);
+
+static void swProcessPool_kill_timeout_worker(swTimer *timer, swTimer_node *tnode)
+{
     uint32_t i;
     pid_t reload_worker_pid = 0;
-    ProcessPool *pool = (ProcessPool *) tnode->data;
-    pool->reloading = false;
+    swProcessPool *pool = (swProcessPool *)tnode->data;
+    pool->reloading = 0;
 
-    for (i = 0; i < pool->worker_num; i++) {
-        if (i >= pool->reload_worker_i) {
+    for (i = 0; i < pool->worker_num; i++)
+    {
+        if (i >= pool->reload_worker_i)
+        {
             reload_worker_pid = pool->reload_workers[i].pid;
-            if (swoole_kill(reload_worker_pid, 0) == -1) {
+            if (swoole_kill(reload_worker_pid, 0) == -1)
+            {
                 continue;
             }
-            if (swoole_kill(reload_worker_pid, SIGKILL) < 0) {
+            if (swoole_kill(reload_worker_pid, SIGKILL) < 0)
+            {
                 swSysWarn("swKill(%d, SIGKILL) [%d] failed", pool->reload_workers[i].pid, i);
-            } else {
+            }
+            else
+            {
                 swWarn("swKill(%d, SIGKILL) [%d]", pool->reload_workers[i].pid, i);
             }
         }
     }
     errno = 0;
     pool->reload_worker_i = 0;
-    pool->reload_init = false;
+    pool->reload_init = 0;
 }
 /**
  * Process manager
  */
-int ProcessPool::create(ProcessPool *pool, uint32_t worker_num, key_t msgqueue_key, int ipc_mode) {
-    *pool = {};
+int swProcessPool_create(swProcessPool *pool, uint32_t worker_num, key_t msgqueue_key, int ipc_mode)
+{
+    bzero(pool, sizeof(swProcessPool));
+
+    uint32_t i;
+
     pool->worker_num = worker_num;
 
     /**
      * Shared memory is used here
      */
-    pool->workers = (Worker *) sw_mem_pool()->alloc(worker_num * sizeof(Worker));
-    if (pool->workers == nullptr) {
+    pool->workers = (swWorker *) SwooleG.memory_pool->alloc(SwooleG.memory_pool, worker_num * sizeof(swWorker));
+    if (pool->workers == nullptr)
+    {
         swSysWarn("malloc[1] failed");
         return SW_ERR;
     }
 
-    if (ipc_mode == SW_IPC_MSGQUEUE) {
+    if (ipc_mode == SW_IPC_MSGQUEUE)
+    {
         pool->use_msgqueue = 1;
         pool->msgqueue_key = msgqueue_key;
-        pool->queue = new MsgQueue(pool->msgqueue_key);
-        if (!pool->queue->ready()) {
-            delete pool->queue;
-            pool->queue = nullptr;
+
+        pool->queue = (swMsgQueue *) sw_malloc(sizeof(swMsgQueue));
+        if (pool->queue == nullptr)
+        {
+            swSysWarn("malloc[2] failed");
             return SW_ERR;
         }
-    } else if (ipc_mode == SW_IPC_UNIXSOCK) {
-        pool->pipes = new std::vector<std::shared_ptr<UnixSocket>>;
-        SW_LOOP_N(worker_num) {
-            auto sock = new UnixSocket(true, SOCK_DGRAM);
-            if (!sock->ready()) {
-                delete sock;
-                delete pool->pipes;
-                pool->pipes = nullptr;
-                return SW_ERR;
-            }
-            pool->pipes->emplace_back(sock);
-            pool->workers[i].pipe_master = sock->get_socket(true);
-            pool->workers[i].pipe_worker = sock->get_socket(false);
-            pool->workers[i].pipe_object = sock;
+
+        if (swMsgQueue_create(pool->queue, 1, pool->msgqueue_key, 0) < 0)
+        {
+            return SW_ERR;
         }
-    } else if (ipc_mode == SW_IPC_SOCKET) {
+    }
+    else if (ipc_mode == SW_IPC_UNIXSOCK)
+    {
+        pool->pipes = (swPipe *) sw_calloc(worker_num, sizeof(swPipe));
+        if (pool->pipes == nullptr)
+        {
+            swWarn("malloc[2] failed");
+            return SW_ERR;
+        }
+
+        swPipe *pipe;
+        for (i = 0; i < worker_num; i++)
+        {
+            pipe = &pool->pipes[i];
+            if (swPipeUnsock_create(pipe, 1, SOCK_DGRAM) < 0)
+            {
+                return SW_ERR;
+            }          
+            pool->workers[i].pipe_master = pipe->getSocket(pipe, SW_PIPE_MASTER);
+            pool->workers[i].pipe_worker = pipe->getSocket(pipe, SW_PIPE_WORKER);
+            pool->workers[i].pipe_object = pipe;
+        }
+    }
+    else if (ipc_mode == SW_IPC_SOCKET)
+    {
         pool->use_socket = 1;
-        pool->stream_info_ = new StreamInfo();
-    } else {
+        pool->stream = (swStreamInfo *) sw_malloc(sizeof(swStreamInfo));
+        if (pool->stream == nullptr)
+        {
+            swWarn("malloc[2] failed");
+            return SW_ERR;
+        }
+        bzero(pool->stream, sizeof(swStreamInfo));
+    }
+    else
+    {
         ipc_mode = SW_IPC_NONE;
     }
 
-    pool->map_ = new std::unordered_map<pid_t, Worker *>;
-
-    pool->ipc_mode = ipc_mode;
-    if (ipc_mode > SW_IPC_NONE) {
-        pool->main_loop = ProcessPool_worker_loop;
+    pool->map = swHashMap_new(SW_HASHMAP_INIT_BUCKET_N, nullptr);
+    if (pool->map == nullptr)
+    {
+        swProcessPool_free(pool);
+        return SW_ERR;
     }
 
-    SW_LOOP_N(worker_num) {
+    pool->ipc_mode = ipc_mode;
+    if (ipc_mode > SW_IPC_NONE)
+    {
+        pool->main_loop = swProcessPool_worker_loop;
+    }
+
+    for (i = 0; i < worker_num; i++)
+    {
         pool->workers[i].pool = pool;
     }
 
     return SW_OK;
 }
 
-int ProcessPool::create_unix_socket(const char *socket_file, int blacklog) {
-    if (ipc_mode != SW_IPC_SOCKET) {
+int swProcessPool_create_unix_socket(swProcessPool *pool, const char *socket_file, int blacklog)
+{
+    if (pool->ipc_mode != SW_IPC_SOCKET)
+    {
         swWarn("ipc_mode is not SW_IPC_SOCKET");
         return SW_ERR;
     }
-    stream_info_->socket_file = sw_strdup(socket_file);
-    if (stream_info_->socket_file == nullptr) {
+    pool->stream->socket_file = sw_strdup(socket_file);
+    if (pool->stream->socket_file == nullptr)
+    {
         return SW_ERR;
     }
-    stream_info_->socket = make_server_socket(SW_SOCK_UNIX_STREAM, stream_info_->socket_file, 0, blacklog);
-    if (!stream_info_->socket) {
+    pool->stream->socket = swSocket_create_server(SW_SOCK_UNIX_STREAM, pool->stream->socket_file, 0, blacklog);
+    if (!pool->stream->socket)
+    {
         return SW_ERR;
     }
     return SW_OK;
 }
 
-int ProcessPool::create_tcp_socket(const char *host, int port, int blacklog) {
-    if (ipc_mode != SW_IPC_SOCKET) {
+int swProcessPool_create_tcp_socket(swProcessPool *pool, const char *host, int port, int blacklog)
+{
+    if (pool->ipc_mode != SW_IPC_SOCKET)
+    {
         swWarn("ipc_mode is not SW_IPC_SOCKET");
         return SW_ERR;
     }
-    stream_info_->socket_file = sw_strdup(host);
-    if (stream_info_->socket_file == nullptr) {
+    pool->stream->socket_file = sw_strdup(host);
+    if (pool->stream->socket_file == nullptr)
+    {
         return SW_ERR;
     }
-    stream_info_->socket = make_server_socket(SW_SOCK_TCP, host, port, blacklog);
-    if (!stream_info_->socket) {
+    pool->stream->socket = swSocket_create_server(SW_SOCK_TCP, host, port, blacklog);
+    if (!pool->stream->socket)
+    {
         return SW_ERR;
     }
     return SW_OK;
@@ -158,23 +198,28 @@ int ProcessPool::create_tcp_socket(const char *host, int port, int blacklog) {
 /**
  * start workers
  */
-int ProcessPool::start() {
-    if (ipc_mode == SW_IPC_SOCKET && (stream_info_ == nullptr || stream_info_->socket == 0)) {
+int swProcessPool_start(swProcessPool *pool)
+{
+    if (pool->ipc_mode == SW_IPC_SOCKET && (pool->stream == nullptr || pool->stream->socket == 0))
+    {
         swWarn("must first listen to an tcp port");
         return SW_ERR;
     }
 
     uint32_t i;
-    running = started = true;
+    pool->started = 1;
 
-    for (i = 0; i < worker_num; i++) {
-        workers[i].pool = this;
-        workers[i].id = start_id + i;
-        workers[i].type = type;
+    for (i = 0; i < pool->worker_num; i++)
+    {
+        pool->workers[i].pool = pool;
+        pool->workers[i].id = pool->start_id + i;
+        pool->workers[i].type = pool->type;
     }
 
-    for (i = 0; i < worker_num; i++) {
-        if (spawn(&(workers[i])) < 0) {
+    for (i = 0; i < pool->worker_num; i++)
+    {
+        if (swProcessPool_spawn(pool, &(pool->workers[i])) < 0)
+        {
             return SW_ERR;
         }
     }
@@ -182,70 +227,83 @@ int ProcessPool::start() {
     return SW_OK;
 }
 
-int ProcessPool::schedule() {
-    if (dispatch_mode == SW_DISPATCH_QUEUE) {
+static sw_inline int swProcessPool_schedule(swProcessPool *pool)
+{
+    if (pool->dispatch_mode == SW_DISPATCH_QUEUE)
+    {
         return 0;
     }
 
     uint32_t i, target_worker_id = 0;
     uint8_t found = 0;
 
-    for (i = 0; i < worker_num + 1; i++) {
-        target_worker_id = sw_atomic_fetch_add(&round_id, 1) % worker_num;
-        if (workers[target_worker_id].status == SW_WORKER_IDLE) {
+    for (i = 0; i < pool->worker_num + 1; i++)
+    {
+        target_worker_id = sw_atomic_fetch_add(&pool->round_id, 1) % pool->worker_num;
+        if (pool->workers[target_worker_id].status == SW_WORKER_IDLE)
+        {
             found = 1;
             break;
         }
     }
-    if (found == 0) {
-        scheduler_warning = 1;
+    if (found == 0)
+    {
+        pool->scheduler_warning = 1;
     }
     return target_worker_id;
 }
 
-int ProcessPool::response(const char *data, int length) {
-    if (stream_info_ == nullptr || stream_info_->last_connection == nullptr ||
-        stream_info_->response_buffer == nullptr) {
+int swProcessPool_response(swProcessPool *pool, const char *data, int length)
+{
+    if (pool->stream == nullptr || pool->stream->last_connection == nullptr || pool->stream->response_buffer == nullptr)
+    {
         swoole_set_last_error(SW_ERROR_INVALID_PARAMS);
         return SW_ERR;
     }
-    return stream_info_->response_buffer->append(data, length);
+    return swString_append_ptr(pool->stream->response_buffer, data, length);
 }
 
 /**
  * dispatch data to worker
  */
-int ProcessPool::dispatch(EventData *data, int *dst_worker_id) {
+int swProcessPool_dispatch(swProcessPool *pool, swEventData *data, int *dst_worker_id)
+{
     int ret = 0;
-    Worker *worker;
+    swWorker *worker;
 
-    if (use_socket) {
-        Stream *stream = Stream::create(stream_info_->socket_file, 0, SW_SOCK_UNIX_STREAM);
-        if (!stream) {
+    if (pool->use_socket)
+    {
+        swStream *stream = swStream_new(pool->stream->socket_file, 0, SW_SOCK_UNIX_STREAM);
+        if (stream == nullptr)
+        {
             return SW_ERR;
         }
         stream->response = nullptr;
-        if (stream->send((char *) data, sizeof(data->info) + data->info.len) < 0) {
+        if (swStream_send(stream, (char*) data, sizeof(data->info) + data->info.len) < 0)
+        {
             stream->cancel = 1;
-            delete stream;
             return SW_ERR;
         }
         return SW_OK;
     }
 
-    if (*dst_worker_id < 0) {
-        *dst_worker_id = schedule();
+    if (*dst_worker_id < 0)
+    {
+        *dst_worker_id = swProcessPool_schedule(pool);
     }
 
-    *dst_worker_id += start_id;
-    worker = get_worker(*dst_worker_id);
+    *dst_worker_id += pool->start_id;
+    worker = swProcessPool_get_worker(pool, *dst_worker_id);
 
     int sendn = sizeof(data->info) + data->info.len;
-    ret = worker->send_pipe_message(data, sendn, SW_PIPE_MASTER | SW_PIPE_NONBLOCK);
+    ret = swWorker_send2worker(worker, data, sendn, SW_PIPE_MASTER | SW_PIPE_NONBLOCK);
 
-    if (ret >= 0) {
+    if (ret >= 0)
+    {
         sw_atomic_fetch_add(&worker->tasking_num, 1);
-    } else {
+    }
+    else
+    {
         swWarn("send %d bytes to worker#%d failed", sendn, *dst_worker_id);
     }
 
@@ -255,136 +313,167 @@ int ProcessPool::dispatch(EventData *data, int *dst_worker_id) {
 /**
  * dispatch data to worker
  */
-int ProcessPool::dispatch_blocking(swEventData *data, int *dst_worker_id) {
+int swProcessPool_dispatch_blocking(swProcessPool *pool, swEventData *data, int *dst_worker_id)
+{
     int ret = 0;
     int sendn = sizeof(data->info) + data->info.len;
 
-    if (use_socket) {
-        swoole::network::Client _socket(SW_SOCK_UNIX_STREAM, false);
-        if (!_socket.socket) {
+    if (pool->use_socket)
+    {
+        swClient _socket;
+        if (swClient_create(&_socket, SW_SOCK_UNIX_STREAM, SW_SOCK_SYNC) < 0)
+        {
             return SW_ERR;
         }
-        if (_socket.connect(&_socket, stream_info_->socket_file, 0, -1, 0) < 0) {
+        if (_socket.connect(&_socket, pool->stream->socket_file, 0, -1, 0) < 0)
+        {
             return SW_ERR;
         }
-        if (_socket.send(&_socket, (char *) data, sendn, 0) < 0) {
+        if (_socket.send(&_socket, (char*) data, sendn, 0) < 0)
+        {
             return SW_ERR;
         }
-        _socket.close();
+        _socket.close(&_socket);
         return SW_OK;
     }
 
-    if (*dst_worker_id < 0) {
-        *dst_worker_id = schedule();
+    if (*dst_worker_id < 0)
+    {
+        *dst_worker_id = swProcessPool_schedule(pool);
     }
 
-    *dst_worker_id += start_id;
-    Worker *worker = get_worker(*dst_worker_id);
+    *dst_worker_id += pool->start_id;
+    swWorker *worker = swProcessPool_get_worker(pool, *dst_worker_id);
 
-    ret = worker->send_pipe_message(data, sendn, SW_PIPE_MASTER);
-    if (ret < 0) {
+    ret = swWorker_send2worker(worker, data, sendn, SW_PIPE_MASTER);
+    if (ret < 0)
+    {
         swWarn("send %d bytes to worker#%d failed", sendn, *dst_worker_id);
-    } else {
+    }
+    else
+    {
         sw_atomic_fetch_add(&worker->tasking_num, 1);
     }
 
     return ret;
 }
 
-void ProcessPool::shutdown() {
+void swProcessPool_shutdown(swProcessPool *pool)
+{
     uint32_t i;
     int status;
-    Worker *worker;
-    running = 0;
+    swWorker *worker;
+    SwooleG.running = 0;
 
-    // concurrent kill
-    for (i = 0; i < worker_num; i++) {
-        worker = &workers[i];
-        if (swoole_kill(worker->pid, SIGTERM) < 0) {
+    swSignal_none();
+    //concurrent kill
+    for (i = 0; i < pool->worker_num; i++)
+    {
+        worker = &pool->workers[i];
+        if (swoole_kill(worker->pid, SIGTERM) < 0)
+        {
             swSysWarn("swKill(%d) failed", worker->pid);
             continue;
         }
     }
-    for (i = 0; i < worker_num; i++) {
-        worker = &workers[i];
-        if (swoole_waitpid(worker->pid, &status, 0) < 0) {
+    for (i = 0; i < pool->worker_num; i++)
+    {
+        worker = &pool->workers[i];
+        if (swoole_waitpid(worker->pid, &status, 0) < 0)
+        {
             swSysWarn("waitpid(%d) failed", worker->pid);
         }
     }
-    started = false;
+    swProcessPool_free(pool);
+    pool->started = 0;
 }
 
-pid_t ProcessPool::spawn(Worker *worker) {
+pid_t swProcessPool_spawn(swProcessPool *pool, swWorker *worker)
+{
     pid_t pid = swoole_fork(0);
     int ret_code = 0;
 
-    switch (pid) {
-    // child
+    switch (pid)
+    {
+    //child
     case 0:
         /**
          * Process start
          */
-        if (onWorkerStart != nullptr) {
-            onWorkerStart(this, worker->id);
+        if (pool->onWorkerStart != nullptr)
+        {
+            pool->onWorkerStart(pool, worker->id);
         }
         /**
          * Process main loop
          */
-        if (main_loop) {
-            ret_code = main_loop(this, worker);
+        if (pool->main_loop)
+        {
+            ret_code = pool->main_loop(pool, worker);
         }
         /**
          * Process stop
          */
-        if (onWorkerStop != nullptr) {
-            onWorkerStop(this, worker->id);
+        if (pool->onWorkerStop != nullptr)
+        {
+            pool->onWorkerStop(pool, worker->id);
         }
         exit(ret_code);
         break;
     case -1:
         swSysWarn("fork() failed");
         break;
-        // parent
+        //parent
     default:
-        // remove old process
-        if (worker->pid) {
-            map_->erase(worker->pid);
+        //remove old process
+        if (worker->pid)
+        {
+            swHashMap_del_int(pool->map, worker->pid);
         }
         worker->pid = pid;
-        // insert new process
-        map_->emplace(std::make_pair(pid, worker));
+        //insert new process
+        swHashMap_add_int(pool->map, pid, worker);
         break;
     }
     return pid;
 }
 
-int ProcessPool::get_max_request() {
+int swProcessPool_get_max_request(swProcessPool *pool)
+{
     int task_n;
-    if (max_request < 1) {
+    if (pool->max_request < 1)
+    {
         return -1;
-    } else {
-        task_n = max_request;
-        if (max_request_grace > 0) {
-            task_n += swoole_system_random(1, max_request_grace);
+    }
+    else
+    {
+        task_n = pool->max_request;
+        if (pool->max_request_grace > 0)
+        {
+            task_n += swoole_system_random(1, pool->max_request_grace);
         }
     }
     return task_n;
 }
 
-void ProcessPool::set_max_request(uint32_t _max_request, uint32_t _max_request_grace) {
-    max_request = _max_request;
-    max_request_grace = _max_request_grace;
+void swProcessPool_set_max_request(swProcessPool *pool, uint32_t max_request, uint32_t max_request_grace)
+{
+    pool->max_request = max_request;
+    pool->max_request_grace = max_request_grace;
 }
 
-static int ProcessPool_worker_loop(ProcessPool *pool, Worker *worker) {
-    struct {
+static int swProcessPool_worker_loop(swProcessPool *pool, swWorker *worker)
+{
+    struct
+    {
         long mtype;
         swEventData buf;
-    } out{};
+    } out;
 
-    ssize_t n = 0, ret, worker_task_always = 0;
-    int task_n = pool->get_max_request();
-    if (task_n <= 0) {
+    int n = 0, ret, worker_task_always = 0;
+    int task_n = swProcessPool_get_max_request(pool);
+    if (task_n <= 0)
+    {
         worker_task_always = 1;
         task_n = 1;
     }
@@ -394,42 +483,59 @@ static int ProcessPool_worker_loop(ProcessPool *pool, Worker *worker) {
      */
     out.buf.info.server_fd = worker->id;
 
-    if (pool->dispatch_mode == SW_DISPATCH_QUEUE) {
+    if (pool->dispatch_mode == SW_DISPATCH_QUEUE)
+    {
         out.mtype = 0;
-    } else {
+    }
+    else
+    {
         out.mtype = worker->id + 1;
     }
 
-    while (pool->running && !SwooleWG.shutdown && task_n > 0) {
+    while (SwooleG.running > 0 && task_n > 0)
+    {
         /**
          * fetch task
          */
-        if (pool->use_msgqueue) {
-            n = pool->queue->pop((QueueNode *) &out, sizeof(out.buf));
-            if (n < 0 && errno != EINTR) {
+        if (pool->use_msgqueue)
+        {
+            n = swMsgQueue_pop(pool->queue, (swQueue_data *) &out, sizeof(out.buf));
+            if (n < 0 && errno != EINTR)
+            {
                 swSysWarn("[Worker#%d] msgrcv() failed", worker->id);
                 break;
             }
-        } else if (pool->use_socket) {
-            Socket *conn = pool->stream_info_->socket->accept();
-            if (conn == nullptr) {
-                if (errno == EAGAIN || errno == EINTR) {
+        }
+        else if (pool->use_socket)
+        {
+            swSocketAddress sa;
+            swSocket *conn = swSocket_accept(pool->stream->socket, &sa);
+            if (conn == nullptr)
+            {
+                if (errno == EAGAIN || errno == EINTR)
+                {
                     continue;
-                } else {
-                    swSysWarn("accept(%d) failed", pool->stream_info_->socket->get_fd());
+                }
+                else
+                {
+                    swSysWarn("accept(%d) failed", pool->stream->socket);
                     break;
                 }
             }
 
-            n = Stream::recv_blocking(conn, (void *) &out.buf, sizeof(out.buf));
-            if (n == SW_CLOSE) {
-                conn->free();
+            n = swStream_recv_blocking(conn, (void*) &out.buf, sizeof(out.buf));
+            if (n == SW_CLOSE)
+            {
+                swSocket_free(conn);
                 continue;
             }
-            pool->stream_info_->last_connection = conn;
-        } else {
-            n = worker->pipe_worker->read(&out.buf, sizeof(out.buf));
-            if (n < 0 && errno != EINTR) {
+            pool->stream->last_connection = conn;
+        }
+        else
+        {
+            n = read(worker->pipe_worker->fd, &out.buf, sizeof(out.buf));
+            if (n < 0 && errno != EINTR)
+            {
                 swSysWarn("[Worker#%d] read(%d) failed", worker->id, worker->pipe_worker->fd);
             }
         }
@@ -437,19 +543,14 @@ static int ProcessPool_worker_loop(ProcessPool *pool, Worker *worker) {
         /**
          * timer
          */
-        if (n < 0) {
-            if (errno == EINTR && SwooleG.signal_alarm && SwooleTG.timer) {
-            _alarm_handler:
-                SwooleG.signal_alarm = false;
-                SwooleTG.timer->select();
+        if (n < 0)
+        {
+            if (errno == EINTR && SwooleWG.signal_alarm && SwooleTG.timer)
+            {
+                _alarm_handler:
+                SwooleWG.signal_alarm = 0;
+                swTimer_select(SwooleTG.timer);
             }
-            continue;
-        }
-
-        if (n != (ssize_t)(out.buf.info.len + sizeof(out.buf.info))) {
-            swWarn("bad task packet, The received data-length[%ld] is inconsistent with the packet-length[%ld]",
-                   n,
-                   out.buf.info.len + sizeof(out.buf.info));
             continue;
         }
 
@@ -460,91 +561,128 @@ static int ProcessPool_worker_loop(ProcessPool *pool, Worker *worker) {
         ret = pool->onTask(pool, &out.buf);
         worker->status = SW_WORKER_IDLE;
 
-        if (pool->use_socket && pool->stream_info_->last_connection) {
+        if (pool->use_socket && pool->stream->last_connection)
+        {
             int _end = 0;
-            pool->stream_info_->last_connection->send_blocking((void *) &_end, sizeof(_end));
-            pool->stream_info_->last_connection->free();
-            pool->stream_info_->last_connection = nullptr;
+            swSocket_write_blocking(pool->stream->last_connection, (void *) &_end, sizeof(_end));
+            swSocket_free(pool->stream->last_connection);
+            pool->stream->last_connection = nullptr;
         }
 
         /**
          * timer
          */
-        if (SwooleG.signal_alarm) {
+        if (SwooleWG.signal_alarm)
+        {
             goto _alarm_handler;
         }
 
-        if (ret >= 0 && !worker_task_always) {
+        if (ret >= 0 && !worker_task_always)
+        {
             task_n--;
         }
     }
     return SW_OK;
 }
 
-int ProcessPool::set_protocol(int task_protocol, uint32_t max_packet_size) {
-    if (task_protocol) {
-        main_loop = ProcessPool_worker_loop;
-    } else {
-        packet_buffer = new char[max_packet_size];
-        if (stream_info_) {
-            stream_info_->response_buffer = new String(SW_BUFFER_SIZE_STD);
+int swProcessPool_set_protocol(swProcessPool *pool, int task_protocol, uint32_t max_packet_size)
+{
+    if (task_protocol)
+    {
+        pool->main_loop = swProcessPool_worker_loop;
+    }
+    else
+    {
+        pool->packet_buffer = (char *) sw_malloc(max_packet_size);
+        if (pool->packet_buffer == nullptr)
+        {
+            swSysWarn("malloc(%d) failed", max_packet_size);
+            return SW_ERR;
         }
-        max_packet_size_ = max_packet_size;
-        main_loop = ProcessPool_worker_loop_ex;
+        if (pool->stream)
+        {
+            pool->stream->response_buffer = swString_new(SW_BUFFER_SIZE_STD);
+            if (pool->stream->response_buffer == nullptr)
+            {
+                sw_free(pool->packet_buffer);
+                return SW_ERR;
+            }
+        }
+        pool->max_packet_size = max_packet_size;
+        pool->main_loop = swProcessPool_worker_loop_ex;
     }
 
     return SW_OK;
 }
 
-static int ProcessPool_worker_loop_ex(ProcessPool *pool, Worker *worker) {
-    ssize_t n;
+static int swProcessPool_worker_loop_ex(swProcessPool *pool, swWorker *worker)
+{
+    uint32_t n;
     char *data;
 
-    QueueNode *outbuf = (QueueNode *) pool->packet_buffer;
+    swQueue_data *outbuf = (swQueue_data *) pool->packet_buffer;
     outbuf->mtype = 0;
 
-    while (pool->running) {
+    while (SwooleG.running > 0)
+    {
         /**
          * fetch task
          */
-        if (pool->use_msgqueue) {
-            n = pool->queue->pop(outbuf, SW_MSGMAX);
-            if (n < 0 && errno != EINTR) {
+        if (pool->use_msgqueue)
+        {
+            n = swMsgQueue_pop(pool->queue, outbuf, SW_MSGMAX);
+            if (n < 0 && errno != EINTR)
+            {
                 swSysWarn("[Worker#%d] msgrcv() failed", worker->id);
                 break;
             }
             data = outbuf->mdata;
             outbuf->mtype = 0;
-        } else if (pool->use_socket) {
-            Socket *conn = pool->stream_info_->socket->accept();
-            if (conn == nullptr) {
-                if (errno == EAGAIN || errno == EINTR) {
+        }
+        else if (pool->use_socket)
+        {
+            swSocketAddress sa;
+            swSocket *conn = swSocket_accept(pool->stream->socket, &sa);
+            if (conn == nullptr)
+            {
+                if (errno == EAGAIN || errno == EINTR)
+                {
                     continue;
-                } else {
-                    swSysWarn("accept(%d) failed", pool->stream_info_->socket->get_fd());
+                }
+                else
+                {
+                    swSysWarn("accept(%d) failed", pool->stream->socket);
                     break;
                 }
             }
             int tmp = 0;
-            if (conn->recv_blocking(&tmp, sizeof(tmp), MSG_WAITALL) <= 0) {
+            if (swSocket_recv_blocking(conn, &tmp, sizeof(tmp), MSG_WAITALL) <= 0)
+            {
                 goto _close;
             }
             n = ntohl(tmp);
-            if (n <= 0) {
-                goto _close;
-            } else if (n > pool->max_packet_size_) {
+            if (n <= 0)
+            {
                 goto _close;
             }
-            if (conn->recv_blocking(pool->packet_buffer, n, MSG_WAITALL) <= 0) {
-            _close:
-                conn->free();
+            else if (n > pool->max_packet_size)
+            {
+                goto _close;
+            }
+            if (swSocket_recv_blocking(conn, pool->packet_buffer, n, MSG_WAITALL) <= 0)
+            {
+                _close:
+                swSocket_free(conn);
                 continue;
             }
             data = pool->packet_buffer;
-            pool->stream_info_->last_connection = conn;
-        } else {
-            n = worker->pipe_worker->read(pool->packet_buffer, pool->max_packet_size_);
-            if (n < 0 && errno != EINTR) {
+            pool->stream->last_connection = conn;
+        }
+        else
+        {
+            n = read(worker->pipe_worker->fd, pool->packet_buffer, pool->max_packet_size);
+            if (n < 0 && errno != EINTR)
+            {
                 swSysWarn("[Worker#%d] read(%d) failed", worker->id, worker->pipe_worker->fd);
             }
             data = pool->packet_buffer;
@@ -553,33 +691,38 @@ static int ProcessPool_worker_loop_ex(ProcessPool *pool, Worker *worker) {
         /**
          * timer
          */
-        if (n < 0) {
-            if (errno == EINTR && SwooleG.signal_alarm && SwooleTG.timer) {
-            _alarm_handler:
-                SwooleG.signal_alarm = false;
-                SwooleTG.timer->select();
+        if (n < 0)
+        {
+            if (errno == EINTR && SwooleWG.signal_alarm && SwooleTG.timer)
+            {
+                _alarm_handler:
+                SwooleWG.signal_alarm = 0;
+                swTimer_select(SwooleTG.timer);
             }
             continue;
         }
 
         pool->onMessage(pool, data, n);
 
-        if (pool->use_socket && pool->stream_info_->last_connection) {
-            String *resp_buf = pool->stream_info_->response_buffer;
-            if (resp_buf && resp_buf->length > 0) {
+        if (pool->use_socket && pool->stream->last_connection)
+        {
+            swString *resp_buf = pool->stream->response_buffer;
+            if (resp_buf && resp_buf->length > 0)
+            {
                 int _l = htonl(resp_buf->length);
-                pool->stream_info_->last_connection->send_blocking(&_l, sizeof(_l));
-                pool->stream_info_->last_connection->send_blocking(resp_buf->str, resp_buf->length);
-                resp_buf->clear();
+                swSocket_write_blocking(pool->stream->last_connection, &_l, sizeof(_l));
+                swSocket_write_blocking(pool->stream->last_connection, resp_buf->str, resp_buf->length);
+                swString_clear(resp_buf);
             }
-            pool->stream_info_->last_connection->free();
-            pool->stream_info_->last_connection = nullptr;
+            swSocket_free(pool->stream->last_connection);
+            pool->stream->last_connection = nullptr;
         }
 
         /**
          * timer
          */
-        if (SwooleG.signal_alarm) {
+        if (SwooleWG.signal_alarm)
+        {
             goto _alarm_handler;
         }
     }
@@ -589,143 +732,175 @@ static int ProcessPool_worker_loop_ex(ProcessPool *pool, Worker *worker) {
 /**
  * add a worker to pool
  */
-int ProcessPool_add_worker(ProcessPool *pool, Worker *worker) {
-    pool->map_->emplace(std::make_pair(worker->pid, worker));
+int swProcessPool_add_worker(swProcessPool *pool, swWorker *worker)
+{
+    swHashMap_add_int(pool->map, worker->pid, worker);
     return SW_OK;
 }
 
-int ProcessPool::wait() {
+int swProcessPool_wait(swProcessPool *pool)
+{
     int pid, new_pid;
     pid_t reload_worker_pid = 0;
     int ret;
     int status;
 
-    reload_workers = (Worker *) sw_calloc(worker_num, sizeof(Worker));
-    if (reload_workers == nullptr) {
+    pool->reload_workers = (swWorker *) sw_calloc(pool->worker_num, sizeof(swWorker));
+    if (pool->reload_workers == nullptr)
+    {
         swError("malloc[reload_workers] failed");
         return SW_ERR;
     }
 
-    while (running) {
-        pid = ::wait(&status);
-        if (SwooleG.signal_alarm && SwooleTG.timer) {
-            SwooleG.signal_alarm = false;
-            SwooleTG.timer->select();
+    while (SwooleG.running)
+    {
+        pid = wait(&status);
+        if (SwooleWG.signal_alarm && SwooleTG.timer)
+        {
+            SwooleWG.signal_alarm = 0;
+            swTimer_select(SwooleTG.timer);
         }
-        if (pid < 0) {
-            if (!running) {
+        if (pid < 0)
+        {
+            if (SwooleG.running == 0)
+            {
                 break;
             }
-            if (!reloading) {
-                if (errno > 0 && errno != EINTR) {
+            if (pool->reloading == 0)
+            {
+                if (errno > 0 && errno != EINTR)
+                {
                     swSysWarn("[Manager] wait failed");
                 }
                 continue;
-            } else {
-                if (!reload_init) {
+            }
+            else
+            {
+                if (pool->reload_init == 0)
+                {
                     swInfo("reload workers");
-                    reload_init = true;
-                    memcpy(reload_workers, workers, sizeof(Worker) * worker_num);
-                    if (max_wait_time) {
-                        swoole_timer_add((long) (max_wait_time * 1000), false, ProcessPool_kill_timeout_worker, this);
+                    pool->reload_init = 1;
+                    memcpy(pool->reload_workers, pool->workers, sizeof(swWorker) * pool->worker_num);
+                    if (pool->max_wait_time)
+                    {
+                        swoole_timer_add((long) (pool->max_wait_time * 1000), SW_FALSE, swProcessPool_kill_timeout_worker, pool);
                     }
                 }
                 goto _kill_worker;
             }
         }
 
-        if (running) {
-            auto iter = map_->find(pid);
-            if (iter == map_->end()) {
-                if (onWorkerNotFound) {
-                    onWorkerNotFound(this, pid, status);
-                } else {
+        if (SwooleG.running == 1)
+        {
+            swWorker *exit_worker = (swWorker *) swHashMap_find_int(pool->map, pid);
+            if (exit_worker == nullptr)
+            {
+                if (pool->onWorkerNotFound)
+                {
+                    pool->onWorkerNotFound(pool, pid, status);
+                }
+                else
+                {
                     swWarn("[Manager]unknow worker[pid=%d]", pid);
                 }
                 continue;
             }
-
-            Worker *exit_worker = iter->second;
-            if (!WIFEXITED(status)) {
-                swWarn("worker#%d abnormal exit, status=%d, signal=%d"
-                       "%s",
-                       exit_worker->id,
-                       WEXITSTATUS(status),
-                       WTERMSIG(status),
-                       WTERMSIG(status) == SIGSEGV ? "\n" SWOOLE_BUG_REPORT : "");
+            if (!WIFEXITED(status))
+            {
+                swWarn(
+                    "worker#%d abnormal exit, status=%d, signal=%d" "%s",
+                    exit_worker->id, WEXITSTATUS(status),  WTERMSIG(status),
+                    WTERMSIG(status) == SIGSEGV ? "\n" SWOOLE_BUG_REPORT : ""
+                );
             }
-            new_pid = spawn(exit_worker);
-            if (new_pid < 0) {
+            new_pid = swProcessPool_spawn(pool, exit_worker);
+            if (new_pid < 0)
+            {
                 swSysWarn("Fork worker process failed");
-                sw_free(reload_workers);
+                sw_free(pool->reload_workers);
                 return SW_ERR;
             }
-            map_->erase(pid);
-            if (pid == reload_worker_pid) {
-                reload_worker_i++;
+            swHashMap_del_int(pool->map, pid);
+            if (pid == reload_worker_pid)
+            {
+                pool->reload_worker_i++;
             }
         }
-    // reload worker
-    _kill_worker:
-        if (reloading) {
-            // reload finish
-            if (reload_worker_i >= worker_num) {
-                reloading = reload_init = false;
-                reload_worker_pid = reload_worker_i = 0;
+        //reload worker
+        _kill_worker:
+        if (pool->reloading == 1)
+        {
+            //reload finish
+            if (pool->reload_worker_i >= pool->worker_num)
+            {
+                pool->reloading = pool->reload_init = reload_worker_pid = pool->reload_worker_i = 0;
                 continue;
             }
-            reload_worker_pid = reload_workers[reload_worker_i].pid;
+            reload_worker_pid = pool->reload_workers[pool->reload_worker_i].pid;
             ret = swoole_kill(reload_worker_pid, SIGTERM);
-            if (ret < 0) {
-                if (errno == ECHILD) {
-                    reload_worker_i++;
+            if (ret < 0)
+            {
+                if (errno == ECHILD)
+                {
+                    pool->reload_worker_i++;
                     goto _kill_worker;
                 }
-                swSysWarn("[Manager]swKill(%d) failed", reload_workers[reload_worker_i].pid);
+                swSysWarn("[Manager]swKill(%d) failed", pool->reload_workers[pool->reload_worker_i].pid);
                 continue;
             }
         }
     }
-    sw_free(reload_workers);
-    reload_workers = nullptr;
+    sw_free(pool->reload_workers);
+    pool->reload_workers = nullptr;
     return SW_OK;
 }
 
-void ProcessPool::destroy() {
-    if (pipes) {
-        delete pipes;
-        pipes = nullptr;
-    }
+static void swProcessPool_free(swProcessPool *pool)
+{
+    uint32_t i;
+    swPipe *_pipe;
 
-    if (queue) {
-        delete queue;
-        queue = nullptr;
-    }
-
-    if (stream_info_) {
-        if (stream_info_->socket) {
-            unlink(stream_info_->socket_file);
-            sw_free((void *) stream_info_->socket_file);
+    if (pool->pipes)
+    {
+        for (i = 0; i < pool->worker_num; i++)
+        {
+            _pipe = &pool->pipes[i];
+            _pipe->close(_pipe);
         }
-        if (stream_info_->socket) {
-            stream_info_->socket->free();
-            stream_info_->socket = nullptr;
+        sw_free(pool->pipes);
+    }
+
+    if (pool->use_msgqueue == 1 && pool->msgqueue_key == 0)
+    {
+        swMsgQueue_free(pool->queue);
+    }
+
+    if (pool->stream)
+    {
+        if (pool->stream->socket)
+        {
+            unlink(pool->stream->socket_file);
+            sw_free((void*) pool->stream->socket_file);
         }
-        if (stream_info_->response_buffer) {
-            delete stream_info_->response_buffer;
+        if (pool->stream->socket)
+        {
+            swSocket_free(pool->stream->socket);
+            pool->stream->socket = nullptr;
         }
-        delete stream_info_;
+        if (pool->stream->response_buffer)
+        {
+            swString_free(pool->stream->response_buffer);
+        }
+        sw_free(pool->stream);
     }
 
-    if (packet_buffer) {
-        delete[] packet_buffer;
+    if (pool->packet_buffer)
+    {
+        sw_free(pool->packet_buffer);
     }
 
-    if (map_) {
-        delete map_;
+    if (pool->map)
+    {
+        swHashMap_free(pool->map);
     }
-
-    sw_mem_pool()->free(workers);
 }
-
-}  // namespace swoole

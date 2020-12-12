@@ -15,207 +15,248 @@
 */
 
 #include "swoole.h"
-#include "swoole_socket.h"
-#include "swoole_reactor.h"
 #include <unordered_map>
-
 #include <sys/select.h>
 
-namespace swoole {
-
-using network::Socket;
-
-class ReactorSelect : public ReactorImpl {
+struct swReactorSelect
+{
     fd_set rfds;
     fd_set wfds;
     fd_set efds;
-    std::unordered_map<int, Socket *> fds;
+    std::unordered_map<int, swSocket*> fds;
     int maxfd;
 
-  public:
-    ReactorSelect(Reactor *reactor);
-    ~ReactorSelect() {}
-    bool ready() override {
-        return true;
+    swReactorSelect()
+    {
+        maxfd = 0;
     }
-    int add(Socket *socket, int events) override;
-    int set(Socket *socket, int events) override;
-    int del(Socket *socket) override;
-    int wait(struct timeval *) override;
 };
 
-#define SW_FD_SET(fd, set)                                                                                             \
-    do {                                                                                                               \
-        if (fd < FD_SETSIZE) FD_SET(fd, set);                                                                          \
-    } while (0)
-
-#define SW_FD_CLR(fd, set)                                                                                             \
-    do {                                                                                                               \
-        if (fd < FD_SETSIZE) FD_CLR(fd, set);                                                                          \
-    } while (0)
-
+#define SW_FD_SET(fd, set)    do{ if (fd<FD_SETSIZE) FD_SET(fd, set);} while(0)
+#define SW_FD_CLR(fd, set)    do{ if (fd<FD_SETSIZE) FD_CLR(fd, set);} while(0)
 #define SW_FD_ISSET(fd, set) ((fd < FD_SETSIZE) && FD_ISSET(fd, set))
 
-ReactorImpl *make_reactor_select(Reactor *_reactor) {
-    return new ReactorSelect(_reactor);
+static int swReactorSelect_add(swReactor *reactor, swSocket *socket, int events);
+static int swReactorSelect_set(swReactor *reactor, swSocket *socket, int events);
+static int swReactorSelect_del(swReactor *reactor, swSocket *socket);
+static int swReactorSelect_wait(swReactor *reactor, struct timeval *timeo);
+static void swReactorSelect_free(swReactor *reactor);
+
+int swReactorSelect_create(swReactor *reactor)
+{
+    //create reactor object
+    swReactorSelect *object = new swReactorSelect;
+    reactor->object = object;
+    //binding method
+    reactor->add = swReactorSelect_add;
+    reactor->set = swReactorSelect_set;
+    reactor->del = swReactorSelect_del;
+    reactor->wait = swReactorSelect_wait;
+    reactor->free = swReactorSelect_free;
+
+    return SW_OK;
 }
 
-ReactorSelect::ReactorSelect(Reactor *reactor) : ReactorImpl(reactor) {
-    maxfd = 0;
+void swReactorSelect_free(swReactor *reactor)
+{
+    swReactorSelect *object = (swReactorSelect *) reactor->object;
+    delete object;
+    sw_free(reactor->object);
 }
 
-int ReactorSelect::add(Socket *socket, int events) {
+int swReactorSelect_add(swReactor *reactor, swSocket *socket, int events)
+{
     int fd = socket->fd;
-    if (fd > FD_SETSIZE) {
+    if (fd > FD_SETSIZE)
+    {
         swWarn("max fd value is FD_SETSIZE(%d).\n", FD_SETSIZE);
         return SW_ERR;
     }
 
-    reactor_->_add(socket, events);
-    fds.emplace(fd, socket);
-    if (fd > maxfd) {
-        maxfd = fd;
+    swReactorSelect *object = (swReactorSelect *) reactor->object;
+    swReactor_add(reactor, socket, events);
+    object->fds.emplace(fd, socket);
+    if (fd > object->maxfd)
+    {
+        object->maxfd = fd;
     }
 
     return SW_OK;
 }
 
-int ReactorSelect::del(Socket *socket) {
-    if (socket->removed) {
-        swoole_error_log(SW_LOG_WARNING,
-                         SW_ERROR_EVENT_SOCKET_REMOVED,
-                         "failed to delete event[%d], it has already been removed",
-                         socket->fd);
-        return SW_ERR;
-    }
+int swReactorSelect_del(swReactor *reactor, swSocket *socket)
+{
+    swReactorSelect *object = (swReactorSelect *) reactor->object;
     int fd = socket->fd;
-    if (fds.erase(fd) == 0) {
+    if (object->fds.erase(fd) == 0)
+    {
         swWarn("swReactorSelect: fd[%d] not found", fd);
         return SW_ERR;
     }
-    SW_FD_CLR(fd, &rfds);
-    SW_FD_CLR(fd, &wfds);
-    SW_FD_CLR(fd, &efds);
-    reactor_->_del(socket);
+    SW_FD_CLR(fd, &object->rfds);
+    SW_FD_CLR(fd, &object->wfds);
+    SW_FD_CLR(fd, &object->efds);
+    swReactor_del(reactor, socket);
     return SW_OK;
 }
 
-int ReactorSelect::set(Socket *socket, int events) {
-    auto i = fds.find(socket->fd);
-    if (i == fds.end()) {
+int swReactorSelect_set(swReactor *reactor, swSocket *socket, int events)
+{
+    swReactorSelect *object = (swReactorSelect *) reactor->object;
+    auto i = object->fds.find(socket->fd);
+    if (i == object->fds.end())
+    {
         swWarn("swReactorSelect: sock[%d] not found", socket->fd);
         return SW_ERR;
     }
-    reactor_->_set(socket, events);
+    swReactor_set(reactor, socket, events);
     return SW_OK;
 }
 
-int ReactorSelect::wait(struct timeval *timeo) {
-    Event event;
-    ReactorHandler handler;
+int swReactorSelect_wait(swReactor *reactor, struct timeval *timeo)
+{
+    swReactorSelect *object = (swReactorSelect *) reactor->object;
+    swEvent event;
+    swReactor_handler handler;
     struct timeval timeout;
     int ret;
 
-    if (reactor_->timeout_msec == 0) {
-        if (timeo == nullptr) {
-            reactor_->timeout_msec = -1;
-        } else {
-            reactor_->timeout_msec = timeo->tv_sec * 1000 + timeo->tv_usec / 1000;
+    if (reactor->timeout_msec == 0)
+    {
+        if (timeo == NULL)
+        {
+            reactor->timeout_msec = -1;
+        }
+        else
+        {
+            reactor->timeout_msec = timeo->tv_sec * 1000 + timeo->tv_usec / 1000;
         }
     }
 
-    reactor_->before_wait();
+    swReactor_before_wait(reactor);
 
-    while (reactor_->running) {
-        FD_ZERO(&(rfds));
-        FD_ZERO(&(wfds));
-        FD_ZERO(&(efds));
+    while (reactor->running > 0)
+    {
+        FD_ZERO(&(object->rfds));
+        FD_ZERO(&(object->wfds));
+        FD_ZERO(&(object->efds));
 
-        if (reactor_->onBegin != nullptr) {
-            reactor_->onBegin(reactor_);
+        if (reactor->onBegin != NULL)
+        {
+            reactor->onBegin(reactor);
         }
 
-        for (auto i = fds.begin(); i != fds.end(); i++) {
+        for (auto i = object->fds.begin(); i != object->fds.end(); i++)
+        {
             int fd = i->first;
             int events = i->second->events;
-            if (Reactor::isset_read_event(events)) {
-                SW_FD_SET(fd, &(rfds));
+            if (swReactor_event_read(events))
+            {
+                SW_FD_SET(fd, &(object->rfds));
             }
-            if (Reactor::isset_write_event(events)) {
-                SW_FD_SET(fd, &(wfds));
+            if (swReactor_event_write(events))
+            {
+                SW_FD_SET(fd, &(object->wfds));
             }
-            if (Reactor::isset_error_event(events)) {
-                SW_FD_SET(fd, &(efds));
+            if (swReactor_event_error(events))
+            {
+                SW_FD_SET(fd, &(object->efds));
             }
         }
 
-        if (reactor_->timeout_msec < 0) {
+        if (reactor->timeout_msec < 0)
+        {
             timeout.tv_sec = UINT_MAX;
             timeout.tv_usec = 0;
-        } else if (reactor_->defer_tasks) {
+        }
+        else if (reactor->defer_tasks)
+        {
             timeout.tv_sec = 0;
             timeout.tv_usec = 0;
-        } else {
-            timeout.tv_sec = reactor_->timeout_msec / 1000;
-            timeout.tv_usec = reactor_->timeout_msec - timeout.tv_sec * 1000;
+        }
+        else
+        {
+            timeout.tv_sec = reactor->timeout_msec / 1000;
+            timeout.tv_usec = reactor->timeout_msec - timeout.tv_sec * 1000;
         }
 
-        ret = select(maxfd + 1, &(rfds), &(wfds), &(efds), &timeout);
-        if (ret < 0) {
-            if (!reactor_->catch_error()) {
+        ret = select(object->maxfd + 1, &(object->rfds), &(object->wfds), &(object->efds), &timeout);
+        if (ret < 0)
+        {
+            if (swReactor_error(reactor) < 0)
+            {
                 swSysWarn("select error");
                 break;
-            } else {
+            }
+            else
+            {
                 goto _continue;
             }
-        } else if (ret == 0) {
-            reactor_->execute_end_callbacks(true);
+        }
+        else if (ret == 0)
+        {
+            if (reactor->onTimeout)
+            {
+                reactor->onTimeout(reactor);
+            }
             SW_REACTOR_CONTINUE;
-        } else {
-            for (int fd = 0; fd <= maxfd; fd++) {
-                auto i = fds.find(fd);
-                if (i == fds.end()) {
+        }
+        else
+        {
+            for (int fd = 0; fd <= object->maxfd; fd++)
+            {
+                auto i = object->fds.find(fd);
+                if (i == object->fds.end())
+                {
                     continue;
                 }
                 event.socket = i->second;
                 event.fd = event.socket->fd;
-                event.reactor_id = reactor_->id;
-                event.type = event.socket->fd_type;
+                event.reactor_id = reactor->id;
+                event.type = event.socket->fdtype;
 
-                // read
-                if (SW_FD_ISSET(event.fd, &(rfds)) && !event.socket->removed) {
-                    handler = reactor_->get_handler(SW_EVENT_READ, event.type);
-                    ret = handler(reactor_, &event);
-                    if (ret < 0) {
-                        swSysWarn("[Reactor#%d] select event[type=READ, fd=%d] handler fail", reactor_->id, event.fd);
+                //read
+                if (SW_FD_ISSET(event.fd, &(object->rfds)) && !event.socket->removed)
+                {
+                    handler = swReactor_get_handler(reactor, SW_EVENT_READ, event.type);
+                    ret = handler(reactor, &event);
+                    if (ret < 0)
+                    {
+                        swSysWarn("[Reactor#%d] select event[type=READ, fd=%d] handler fail", reactor->id, event.fd);
                     }
                 }
-                // write
-                if (SW_FD_ISSET(event.fd, &(wfds)) && !event.socket->removed) {
-                    handler = reactor_->get_handler(SW_EVENT_WRITE, event.type);
-                    ret = handler(reactor_, &event);
-                    if (ret < 0) {
-                        swSysWarn("[Reactor#%d] select event[type=WRITE, fd=%d] handler fail", reactor_->id, event.fd);
+                //write
+                if (SW_FD_ISSET(event.fd, &(object->wfds)) && !event.socket->removed)
+                {
+                    handler = swReactor_get_handler(reactor, SW_EVENT_WRITE, event.type);
+                    ret = handler(reactor, &event);
+                    if (ret < 0)
+                    {
+                        swSysWarn("[Reactor#%d] select event[type=WRITE, fd=%d] handler fail", reactor->id, event.fd);
                     }
                 }
-                // error
-                if (SW_FD_ISSET(event.fd, &(efds)) && !event.socket->removed) {
-                    handler = reactor_->get_handler(SW_EVENT_ERROR, event.type);
-                    ret = handler(reactor_, &event);
-                    if (ret < 0) {
-                        swSysWarn("[Reactor#%d] select event[type=ERROR, fd=%d] handler fail", reactor_->id, event.fd);
+                //error
+                if (SW_FD_ISSET(event.fd, &(object->efds)) && !event.socket->removed)
+                {
+                    handler = swReactor_get_handler(reactor, SW_EVENT_ERROR, event.type);
+                    ret = handler(reactor, &event);
+                    if (ret < 0)
+                    {
+                        swSysWarn("[Reactor#%d] select event[type=ERROR, fd=%d] handler fail", reactor->id, event.fd);
                     }
                 }
-                if (!event.socket->removed && (event.socket->events & SW_EVENT_ONCE)) {
-                    del(event.socket);
+                if (!event.socket->removed && (event.socket->events & SW_EVENT_ONCE))
+                {
+                    swReactorSelect_del(reactor, event.socket);
                 }
             }
         }
-    _continue:
-        reactor_->execute_end_callbacks(false);
+        _continue:
+        if (reactor->onFinish)
+        {
+            reactor->onFinish(reactor);
+        }
         SW_REACTOR_CONTINUE;
     }
     return SW_OK;
 }
-
-}  // namespace swoole

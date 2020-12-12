@@ -18,7 +18,6 @@ static void multipart_log(const char * format, ...)
     fprintf(stderr, "[HTTP_MULTIPART_PARSER] %s:%d: ", __FILE__, __LINE__);
     vfprintf(stderr, format, args);
     fprintf(stderr, "\n");
-    va_end(args);
 #endif
 }
 

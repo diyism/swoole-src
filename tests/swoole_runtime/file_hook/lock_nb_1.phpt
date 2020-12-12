@@ -14,20 +14,16 @@ const FILE = __DIR__ . '/test.data';
 
 Swoole\Runtime::enableCoroutine();
 
-$cid = 0;
-
-go(function () use (&$cid)  {
+go(function () {
     $fp = fopen(FILE, 'w+');
     Assert::true(flock($fp, LOCK_EX));
-    Co::resume($cid);
     Co::sleep(0.01);
     flock($fp, LOCK_UN);
     fclose($fp);
 });
 
-go(function () use (&$cid) {
-    $cid = Co::getCid();
-    Co::yield();
+
+go(function () {
     $fp = fopen(FILE, 'w+');
     Assert::same(flock($fp, LOCK_NB | LOCK_EX), false);
 });

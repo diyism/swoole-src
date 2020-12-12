@@ -15,107 +15,97 @@
 */
 
 #include "swoole_api.h"
-#include "swoole_socket.h"
-#include "swoole_reactor.h"
-#include "swoole_client.h"
-#include "swoole_async.h"
-#include "swoole_coroutine_c_api.h"
-#include "swoole_coroutine_socket.h"
-#include "swoole_coroutine_system.h"
 
 #include <mutex>
 #include <thread>
 
-using namespace swoole;
+using namespace std;
 
-using swoole::network::Socket;
-
-static std::mutex init_lock;
+static mutex init_lock;
 
 #ifdef __MACH__
-Reactor *sw_reactor() {
+swReactor* sw_reactor()
+{
     return SwooleTG.reactor;
 }
 #endif
 
-int swoole_event_init(int flags) {
-    if (!SwooleG.init) {
-        std::unique_lock<std::mutex> lock(init_lock);
+int swoole_event_init()
+{
+    if (!SwooleG.init)
+    {
+        unique_lock<mutex> lock(init_lock);
         swoole_init();
     }
 
-    Reactor *reactor = new Reactor(SW_REACTOR_MAXEVENTS);
-    if (!reactor->ready()) {
+    SwooleTG.reactor = (swReactor *) sw_malloc(sizeof(swReactor));
+    if (!SwooleTG.reactor)
+    {
+        swSysWarn("malloc failed");
         return SW_ERR;
     }
-
-    if (flags & SW_EVENTLOOP_WAIT_EXIT) {
-        reactor->wait_exit = 1;
+    if (swReactor_create(SwooleTG.reactor, SW_REACTOR_MAXEVENTS) < 0)
+    {
+        sw_free(SwooleTG.reactor);
+        SwooleTG.reactor = nullptr;
+        return SW_ERR;
     }
-
-    coroutine::Socket::init_reactor(reactor);
-    coroutine::System::init_reactor(reactor);
-    network::Client::init_reactor(reactor);
-
-    SwooleTG.reactor = reactor;
-
     return SW_OK;
 }
 
-int swoole_event_add(Socket *socket, int events) {
-    return SwooleTG.reactor->add(socket, events);
+int swoole_event_add(swSocket *socket, int events)
+{
+    return SwooleTG.reactor->add(SwooleTG.reactor, socket, events);
 }
 
-int swoole_event_set(Socket *socket, int events) {
-    return SwooleTG.reactor->set(socket, events);
+int swoole_event_set(swSocket *socket, int events)
+{
+    return SwooleTG.reactor->set(SwooleTG.reactor, socket, events);
 }
 
-int swoole_event_del(Socket *socket) {
-    return SwooleTG.reactor->del(socket);
+int swoole_event_del(swSocket *socket)
+{
+    return SwooleTG.reactor->del(SwooleTG.reactor, socket);
 }
 
-int swoole_event_wait() {
-    Reactor *reactor = SwooleTG.reactor;
+int swoole_event_wait()
+{
+    swReactor *reactor = SwooleTG.reactor;
     int retval = 0;
-    if (!reactor->wait_exit or !reactor->if_exit()) {
-        retval = SwooleTG.reactor->wait(nullptr);
+    if (!reactor->is_empty(reactor))
+    {
+        retval = SwooleTG.reactor->wait(SwooleTG.reactor, nullptr);
     }
     swoole_event_free();
     return retval;
 }
 
-int swoole_event_free() {
-    if (!SwooleTG.reactor) {
+int swoole_event_free()
+{
+    if (!SwooleTG.reactor)
+    {
         return SW_ERR;
     }
-    delete SwooleTG.reactor;
+    swReactor_destroy(SwooleTG.reactor);
+    sw_free(SwooleTG.reactor);
     SwooleTG.reactor = nullptr;
     return SW_OK;
 }
 
-void swoole_event_defer(Callback cb, void *private_data) {
-    SwooleTG.reactor->defer(cb, private_data);
+void swoole_event_defer(swCallback cb, void *private_data)
+{
+    SwooleTG.reactor->defer(SwooleTG.reactor, cb, private_data);
 }
 
 /**
  * @return SW_OK or SW_ERR
  */
-ssize_t swoole_event_write(Socket *socket, const void *data, size_t len) {
+int swoole_event_write(swSocket *socket, const void *data, size_t len)
+{
     return SwooleTG.reactor->write(SwooleTG.reactor, socket, data, len);
 }
 
-ssize_t swoole_event_writev(swoole::network::Socket *socket, const iovec *iov, size_t iovcnt) {
-    return SwooleTG.reactor->writev(SwooleTG.reactor, socket, iov, iovcnt);
-}
-
-bool swoole_event_set_handler(int fdtype, ReactorHandler handler) {
-    return SwooleTG.reactor->set_handler(fdtype, handler);
-}
-
-bool swoole_event_isset_handler(int fdtype) {
-    return SwooleTG.reactor->isset_handler(fdtype);
-}
-
-bool swoole_event_is_available() {
-    return SwooleTG.reactor and !SwooleTG.reactor->destroyed;
+int swoole_event_set_handler(int fdtype, swReactor_handler handle)
+{
+    return swReactor_set_handler(SwooleTG.reactor, fdtype, handle);
 }

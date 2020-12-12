@@ -17,13 +17,10 @@
  */
 
 #include "swoole.h"
-#include "swoole_socket.h"
-#include "swoole_http2.h"
+#include "http2.h"
 
-using swoole::Protocol;
-using swoole::network::Socket;
-
-int swHttp2_send_setting_frame(Protocol *protocol, Socket *_socket) {
+int swHttp2_send_setting_frame(swProtocol *protocol, swSocket *_socket)
+{
     char setting_frame[SW_HTTP2_FRAME_HEADER_SIZE + SW_HTTP2_SETTING_OPTION_SIZE * 3];
     char *p = setting_frame;
     uint16_t id;
@@ -49,7 +46,7 @@ int swHttp2_send_setting_frame(Protocol *protocol, Socket *_socket) {
     value = htonl(SW_HTTP2_MAX_MAX_FRAME_SIZE);
     memcpy(p + 2, &value, sizeof(value));
 
-    return _socket->send(setting_frame, sizeof(setting_frame), 0);
+    return swSocket_send(_socket, setting_frame, sizeof(setting_frame), 0);
 }
 
 /**
@@ -63,15 +60,19 @@ int swHttp2_send_setting_frame(Protocol *protocol, Socket *_socket) {
  |                   Frame Payload (0...)                      ...
  +---------------------------------------------------------------+
  */
-ssize_t swHttp2_get_frame_length(Protocol *protocol, Socket *conn, const char *buf, uint32_t length) {
-    if (length < SW_HTTP2_FRAME_HEADER_SIZE) {
+ssize_t swHttp2_get_frame_length(swProtocol *protocol, swSocket *conn, const char *buf, uint32_t length)
+{
+    if (length < SW_HTTP2_FRAME_HEADER_SIZE)
+    {
         return 0;
     }
     return swHttp2_get_length(buf) + SW_HTTP2_FRAME_HEADER_SIZE;
 }
 
-const char *swHttp2_get_type(int type) {
-    switch (type) {
+const char* swHttp2_get_type(int type)
+{
+    switch(type)
+    {
     case SW_HTTP2_TYPE_DATA:
         return "DATA";
     case SW_HTTP2_TYPE_HEADERS:
@@ -97,8 +98,10 @@ const char *swHttp2_get_type(int type) {
     }
 }
 
-int swHttp2_get_type_color(int type) {
-    switch (type) {
+int swHttp2_get_type_color(int type)
+{
+    switch(type)
+    {
     case SW_HTTP2_TYPE_DATA:
     case SW_HTTP2_TYPE_WINDOW_UPDATE:
         return SW_COLOR_MAGENTA;

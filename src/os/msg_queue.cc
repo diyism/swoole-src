@@ -15,104 +15,131 @@
 */
 
 #include "swoole.h"
-#include "swoole_msg_queue.h"
 
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 
-namespace swoole {
-
-bool MsgQueue::destroy() {
-    if (msgctl(msg_id_, IPC_RMID, 0) < 0) {
-        swSysWarn("msgctl(%d, IPC_RMID) failed", msg_id_);
-        return false;
+int swMsgQueue_free(swMsgQueue *q)
+{
+    if (msgctl(q->msg_id, IPC_RMID, 0) < 0)
+    {
+        swSysWarn("msgctl(%d, IPC_RMID) failed", q->msg_id);
+        return SW_ERR;
     }
-    msg_id_ = -1;
-    return true;
+    return SW_OK;
 }
 
-void MsgQueue::set_blocking(bool blocking) {
-    if (blocking == 0) {
-        flags_ = flags_ | IPC_NOWAIT;
-    } else {
-        flags_ = flags_ & (~IPC_NOWAIT);
+void swMsgQueue_set_blocking(swMsgQueue *q, uint8_t blocking)
+{
+    if (blocking == 0)
+    {
+        q->flags = q->flags | IPC_NOWAIT;
+    }
+    else
+    {
+        q->flags = q->flags & (~IPC_NOWAIT);
     }
 }
 
-MsgQueue::MsgQueue(key_t msg_key, bool blocking, int perms) {
-    if (perms <= 0 || perms >= 01000) {
+int swMsgQueue_create(swMsgQueue *q, int blocking, key_t msg_key, int perms)
+{
+    if (perms <= 0 || perms >= 01000)
+    {
         perms = 0666;
     }
-    msg_key_ = msg_key;
-    flags_ = 0;
-    perms_ = perms;
-    blocking_ = blocking;
-    msg_id_ = msgget(msg_key, IPC_CREAT | perms);
-    if (msg_id_ < 0) {
+    int msg_id;
+    msg_id = msgget(msg_key, IPC_CREAT | perms);
+    if (msg_id < 0)
+    {
         swSysWarn("msgget() failed");
-    } else {
-        set_blocking(blocking);
+        return SW_ERR;
     }
+    else
+    {
+        bzero(q, sizeof(swMsgQueue));
+        q->msg_id = msg_id;
+        q->perms = perms;
+        q->blocking = blocking;
+        swMsgQueue_set_blocking(q, blocking);
+    }
+    return 0;
 }
 
-MsgQueue::~MsgQueue() {
-    // private queue must be destroyed
-    if (msg_key_ == IPC_PRIVATE && msg_id_ >= 0) {
-        destroy();
-    }
-}
-
-ssize_t MsgQueue::pop(QueueNode *data, size_t mdata_size) {
-    ssize_t ret = msgrcv(msg_id_, data, mdata_size, data->mtype, flags_);
-    if (ret < 0) {
+int swMsgQueue_pop(swMsgQueue *q, swQueue_data *data, int length)
+{
+    int ret = msgrcv(q->msg_id, data, length, data->mtype, q->flags);
+    if (ret < 0)
+    {
         swoole_set_last_error(errno);
-        if (errno != ENOMSG && errno != EINTR) {
-            swSysWarn("msgrcv(%d, %zu, %ld) failed", msg_id_, mdata_size, data->mtype);
+        if (errno != ENOMSG && errno != EINTR)
+        {
+            swSysWarn("msgrcv(%d, %d, %ld) failed", q->msg_id, length, data->mtype);
         }
     }
     return ret;
 }
 
-bool MsgQueue::push(QueueNode *in, size_t mdata_length) {
-    while (1) {
-        if (msgsnd(msg_id_, in, mdata_length, flags_) == 0) {
-            return true;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno != EAGAIN) {
-            swSysWarn("msgsnd(%d, %lu, %ld) failed", msg_id_, mdata_length, in->mtype);
-        }
-        swoole_set_last_error(errno);
-        break;
+int swMsgQueue_push(swMsgQueue *q, swQueue_data *in, int length)
+{
+    int ret;
 
+    while (1)
+    {
+        ret = msgsnd(q->msg_id, in, length, q->flags);
+        if (ret < 0)
+        {
+            swoole_set_last_error(errno);
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            else if (errno == EAGAIN)
+            {
+                return -1;
+            }
+            else
+            {
+                swSysWarn("msgsnd(%d, %d, %ld) failed", q->msg_id, length, in->mtype);
+                return -1;
+            }
+        }
+        else
+        {
+            return ret;
+        }
     }
-    return false;
+    return 0;
 }
 
-bool MsgQueue::stat(size_t *queue_num, size_t *queue_bytes) {
+int swMsgQueue_stat(swMsgQueue *q, int *queue_num, int *queue_bytes)
+{
     struct msqid_ds __stat;
-    if (msgctl(msg_id_, IPC_STAT, &__stat) == 0) {
+    if (msgctl(q->msg_id, IPC_STAT, &__stat) == 0)
+    {
         *queue_num = __stat.msg_qnum;
         *queue_bytes = __stat.msg_cbytes;
-        return true;
-    } else {
-        return false;
+        return 0;
+    }
+    else
+    {
+        return -1;
     }
 }
 
-bool MsgQueue::set_capacity(size_t queue_bytes) {
+int swMsgQueue_set_capacity(swMsgQueue *q, int queue_bytes)
+{
     struct msqid_ds __stat;
-    if (msgctl(msg_id_, IPC_STAT, &__stat) != 0) {
-        return false;
+    if (msgctl(q->msg_id, IPC_STAT, &__stat) != 0)
+    {
+        return -1;
     }
     __stat.msg_qbytes = queue_bytes;
-    if (msgctl(msg_id_, IPC_SET, &__stat)) {
-        swSysWarn("msgctl(msqid=%d, IPC_SET, msg_qbytes=%lu) failed", msg_id_, queue_bytes);
-        return false;
+    if (msgctl(q->msg_id, IPC_SET, &__stat))
+    {
+        swSysWarn("msgctl(msqid=%d, IPC_SET, msg_qbytes=%d) failed", q->msg_id, queue_bytes);
+        return -1;
     }
-    return true;
+    return 0;
 }
-}  // namespace swoole
+

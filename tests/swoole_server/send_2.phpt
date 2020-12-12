@@ -8,11 +8,14 @@ require __DIR__ . '/../include/skipif.inc';
 <?php
 require __DIR__ . '/../include/bootstrap.php';
 
+const REQ_N = IS_IN_TRAVIS ? 128 : 512;
+const CLIENT_N = IS_IN_TRAVIS ? 8 : 16;
+
 $pm = new SwooleTest\ProcessManager;
 
 $pm->parentFunc = function ($pid) use ($pm) {
     $total = 0;
-    for ($i = 0; $i < MAX_CONCURRENCY_MID; $i++) {
+    for ($i = 0; $i < CLIENT_N; $i++) {
         go(function () use ($pm, $i, &$total) {
             $cli = new Co\Client(SWOOLE_SOCK_TCP);
             $cli->set([
@@ -26,7 +29,7 @@ $pm->parentFunc = function ($pid) use ($pm) {
                 echo "ERROR\n";
                 return;
             }
-            $n = MAX_REQUESTS;
+            $n = REQ_N;
             while ($n--) {
                 $data = $cli->recv();
                 Assert::assert($data);
@@ -62,7 +65,7 @@ $pm->childFunc = function () use ($pm) {
     });
     $serv->on('connect', function (Swoole\Server $serv, $fd, $rid) {
 //        echo "new client, fd=$fd\n";
-        $n = MAX_REQUESTS;
+        $n = REQ_N;
         while ($n--) {
             $len = rand(8192, 1024 * 1024);
             $send_data = str_repeat(chr(ord('A') + $n % 10), $len);

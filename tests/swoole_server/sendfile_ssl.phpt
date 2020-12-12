@@ -47,14 +47,14 @@ $pm->childFunc = function () use ($pm) {
     $serv->set([
         //'log_file' => '/dev/null',
         'kernel_socket_send_buffer_size' => 65536,
-        'ssl_cert_file' => SSL_FILE_DIR.'/server.crt',
-        'ssl_key_file' => SSL_FILE_DIR.'/server.key',
+        'ssl_cert_file' => dirname(__DIR__) . '/include/api/swoole_http_server/localhost-ssl/server.crt',
+        'ssl_key_file' => dirname(__DIR__) . '/include/api/swoole_http_server/localhost-ssl/server.key',
     ]);
     $serv->on("workerStart", function ($serv) use ($pm) {
         $pm->wakeup();
     });
     $serv->on('connect', function (swoole_server $serv, $fd) {
-        Assert::true($serv->sendfile($fd, TEST_IMAGE));
+        $serv->sendfile($fd, TEST_IMAGE);
     });
     $serv->on('receive', function ($serv, $fd, $reactor_id, $data) {
 

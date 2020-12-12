@@ -17,7 +17,7 @@
  */
 
 #include "thirdparty/php/standard/proc_open.h"
-#include "swoole_coroutine_c_api.h"
+#include "coroutine_c_api.h"
 
 using namespace std;
 using swoole::coroutine::Socket;
@@ -153,10 +153,9 @@ static void proc_co_rsrc_dtor(zend_resource *rsrc)
         }
     }
 
-    if (proc->running) {
-        if (::waitpid(proc->child, &wstatus, WNOHANG) == 0) {
-            swoole_coroutine_waitpid(proc->child, &wstatus, 0);
-        }
+    if (proc->running)
+    {
+        swoole_coroutine_waitpid(proc->child, &wstatus, 0);
     }
     if (proc->wstatus)
     {

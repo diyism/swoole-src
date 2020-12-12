@@ -46,7 +46,7 @@
 # include "win32/readdir.h"
 #endif
 
-#include "swoole_file_hook.h"
+#include "file_hook.h"
 
 #if !defined(WINDOWS) && !defined(NETWARE)
 extern int php_get_uid_by_name(const char *name, uid_t *uid);
@@ -60,11 +60,11 @@ extern int php_get_gid_by_name(const char *name, gid_t *gid);
 #endif
 
 #if PHP_VERSION_ID < 70400
-static size_t sw_php_stdiop_write(php_stream *stream, const char *buf, size_t count);
-static size_t sw_php_stdiop_read(php_stream *stream, char *buf, size_t count);
+static size_t php_stdiop_write(php_stream *stream, const char *buf, size_t count);
+static size_t php_stdiop_read(php_stream *stream, char *buf, size_t count);
 #else
-static ssize_t sw_php_stdiop_write(php_stream *stream, const char *buf, size_t count);
-static ssize_t sw_php_stdiop_read(php_stream *stream, char *buf, size_t count);
+static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t count);
+static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count);
 #endif
 static int sw_php_stdiop_close(php_stream *stream, int close_handle);
 static int php_stdiop_stat(php_stream *stream, php_stream_statbuf *ssb);
@@ -76,10 +76,6 @@ static int php_stdiop_cast(php_stream *stream, int castas, void **ret);
 static void php_stream_mode_sanitize_fdopen_fopencookie(php_stream *stream, char *result);
 static php_stream *_sw_php_stream_fopen_from_fd_int(int fd, const char *mode, const char *persistent_id STREAMS_DC);
 static php_stream *_sw_php_stream_fopen_from_fd(int fd, const char *mode, const char *persistent_id STREAMS_DC);
-
-static inline zend_bool file_can_poll(zend_stat_t *_stat) {
-    return S_ISCHR(_stat->st_mode) || S_ISSOCK(_stat->st_mode) || S_ISFIFO(_stat->st_mode);
-}
 
 static int sw_php_stream_parse_fopen_modes(const char *mode, int *open_flags)
 {
@@ -156,40 +152,38 @@ static int sw_php_stream_parse_fopen_modes(const char *mode, int *open_flags)
 /* {{{ ------- STDIO stream implementation -------*/
 
 typedef struct {
-    FILE *file;
-    int fd;                 /* underlying file descriptor */
-    unsigned is_process_pipe:1; /* use pclose instead of fclose */
-    unsigned is_pipe:1;     /* stream is an actual pipe, currently Windows only*/
-    unsigned cached_fstat:1;    /* sb is valid */
-    unsigned is_pipe_blocking:1; /* allow blocking read() on pipes, currently Windows only */
-    unsigned no_forced_fstat:1;  /* Use fstat cache even if forced */
-    unsigned is_seekable:1;     /* don't try and seek, if not set */
-    unsigned _reserved:26;
+	FILE *file;
+	int fd;					/* underlying file descriptor */
+	unsigned is_process_pipe:1;	/* use pclose instead of fclose */
+	unsigned is_pipe:1;			/* don't try and seek */
+	unsigned cached_fstat:1;	/* sb is valid */
+	unsigned is_pipe_blocking:1; /* allow blocking read() on pipes, currently Windows only */
+	unsigned _reserved:28;
 
-    int lock_flag;          /* stores the lock state */
-    zend_string *temp_name; /* if non-null, this is the path to a temporary file that
-                             * is to be deleted when the stream is closed */
+	int lock_flag;			/* stores the lock state */
+	zend_string *temp_name;	/* if non-null, this is the path to a temporary file that
+							 * is to be deleted when the stream is closed */
 #if HAVE_FLUSHIO
-    char last_op;
+	char last_op;
 #endif
 
 #if HAVE_MMAP
-    char *last_mapped_addr;
-    size_t last_mapped_len;
+	char *last_mapped_addr;
+	size_t last_mapped_len;
 #endif
 #ifdef PHP_WIN32
-    char *last_mapped_addr;
-    HANDLE file_mapping;
+	char *last_mapped_addr;
+	HANDLE file_mapping;
 #endif
 
-    zend_stat_t sb;
+	zend_stat_t sb;
 } php_stdio_stream_data;
 
 #define PHP_STDIOP_GET_FD(anfd, data)	anfd = (data)->file ? fileno((data)->file) : (data)->fd
 
 static php_stream_ops sw_php_stream_stdio_ops = {
-    sw_php_stdiop_write,
-    sw_php_stdiop_read,
+    php_stdiop_write,
+    php_stdiop_read,
     sw_php_stdiop_close,
     php_stdiop_flush,
     "STDIO/coroutine",
@@ -228,44 +222,38 @@ static php_stream *_sw_php_stream_fopen_from_fd_int(int fd, const char *mode, co
 }
 
 #if PHP_VERSION_ID < 70400
-static size_t sw_php_stdiop_write(php_stream *stream, const char *buf, size_t count)
+static size_t php_stdiop_write(php_stream *stream, const char *buf, size_t count)
 #else
-static ssize_t sw_php_stdiop_write(php_stream *stream, const char *buf, size_t count)
+static ssize_t php_stdiop_write(php_stream *stream, const char *buf, size_t count)
 #endif
 {
     php_stdio_stream_data *data = (php_stdio_stream_data*) stream->abstract;
 
     assert(data != NULL);
 
-    if (data->fd >= 0) {
-        if (file_can_poll(&data->sb)) {
-            if (!swoole_coroutine_socket_exists(data->fd) && swoole_coroutine_socket_create(data->fd) < 0) {
-                stream->eof = 1;
-                return -1;
-            }
-            return swoole_coroutine_write(data->fd, buf, count);
-        } else {
-            int bytes_written = write(data->fd, buf, count);
+    if (data->fd >= 0)
+    {
+        int bytes_written = write(data->fd, buf, count);
 #if PHP_VERSION_ID < 70400
-            if (bytes_written < 0)
-            {
-                return 0;
-            }
-            return (size_t) bytes_written;
-#else
-            return bytes_written;
-#endif
+        if (bytes_written < 0)
+        {
+            return 0;
         }
-
-    } else {
+        return (size_t) bytes_written;
+#else
+        return bytes_written;
+#endif
+    }
+    else
+    {
         return fwrite(buf, 1, count, data->file);
     }
 }
 
 #if PHP_VERSION_ID < 70400
-static size_t sw_php_stdiop_read(php_stream *stream, char *buf, size_t count)
+static size_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 #else
-static ssize_t sw_php_stdiop_read(php_stream *stream, char *buf, size_t count)
+static ssize_t php_stdiop_read(php_stream *stream, char *buf, size_t count)
 #endif
 {
     php_stdio_stream_data *data = (php_stdio_stream_data*) stream->abstract;
@@ -275,26 +263,17 @@ static ssize_t sw_php_stdiop_read(php_stream *stream, char *buf, size_t count)
 
     if (data->fd >= 0)
     {
-        if (file_can_poll(&data->sb)) {
-            if (!swoole_coroutine_socket_exists(data->fd) && swoole_coroutine_socket_create(data->fd) < 0) {
-                stream->eof = 1;
-                return -1;
-            }
-            return swoole_coroutine_read(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
-        }
-        // file
-        else {
-            ret = read(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
+        ret = read(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
 
-            if (ret == (size_t) -1 && errno == EINTR) {
-                /* Read was interrupted, retry once,
-                 If read still fails, giveup with feof==0
-                 so script can retry if desired */
-                ret = read(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
-            }
-            stream->eof =
-                    (ret == 0 || (ret == (size_t) -1 && errno != EWOULDBLOCK && errno != EINTR && errno != EBADF));
+        if (ret == (size_t) -1 && errno == EINTR)
+        {
+            /* Read was interrupted, retry once,
+             If read still fails, giveup with feof==0
+             so script can retry if desired */
+            ret = read(data->fd, buf, PLAIN_WRAP_BUF_SIZE(count));
         }
+
+        stream->eof = (ret == 0 || (ret == (size_t) -1 && errno != EWOULDBLOCK && errno != EINTR && errno != EBADF));
     }
     else
     {

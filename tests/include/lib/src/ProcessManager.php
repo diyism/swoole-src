@@ -34,7 +34,6 @@ class ProcessManager
     protected $freePorts = [];
     protected $randomFunc = 'get_safe_random';
     protected $randomData = [[]];
-    protected $randomDataArray = [];
 
     /**
      * wait wakeup 1s default
@@ -54,7 +53,6 @@ class ProcessManager
      * @var Process
      */
     protected $childProcess;
-    protected $logFileHandle;
 
     public function __construct()
     {
@@ -118,16 +116,6 @@ class ProcessManager
         }
     }
 
-    public function setLogFile($file)
-    {
-        $this->logFileHandle = fopen($file, "a+");
-    }
-
-    public function writeLog($msg)
-    {
-        fwrite($this->logFileHandle, $msg . PHP_EOL);
-    }
-
     /**
      * @param int $index
      * @return mixed
@@ -145,36 +133,6 @@ class ProcessManager
     public function initRandomData(int $size, int $len = null)
     {
         $this->initRandomDataEx(1, $size, $len);
-    }
-
-    /**
-     * 生成一个随机字节组成的数组
-     * @param int $n
-     * @param int $len 默认为0，表示随机产生长度
-     * @param bool $base64
-     * @throws \Exception
-     */
-    public function initRandomDataArray($n = 1, $len = 0, bool $base64 = false)
-    {
-        while ($n--) {
-            if ($len == 0) {
-                $len = rand(1024, 1 * 1024 * 1024);
-            }
-            $bytes = random_bytes($len);
-            $this->randomDataArray[] = $base64 ? base64_encode($bytes) : $bytes;
-        }
-    }
-
-    /**
-     * @param $index
-     * @return mixed
-     */
-    public function getRandomDataElement(int $index = 0)
-    {
-        if (!isset($this->randomDataArray[$index])) {
-            throw new RuntimeException("out of array");
-        }
-        return $this->randomDataArray[$index];
     }
 
     public function getRandomData()
@@ -249,15 +207,10 @@ class ProcessManager
 
     public function initFreePorts(int $num = 1)
     {
-        for ($i = $num; $i--;) {
-            $this->freePorts[] = $this->useConstantPorts ? (9500 + $num - $i + count($this->freePorts)) : get_one_free_port();
-        }
-    }
-
-    public function initFreeIPv6Ports(int $num = 1)
-    {
-        for ($i = $num; $i--;) {
-            $this->freePorts[] = $this->useConstantPorts ? (9500 + $num - $i + count($this->freePorts)) : get_one_free_port_ipv6();
+        if (empty($this->freePorts)) {
+            for ($i = $num; $i--;) {
+                $this->freePorts[] = $this->useConstantPorts ? (9500 + $num - $i) : get_one_free_port();
+            }
         }
     }
 

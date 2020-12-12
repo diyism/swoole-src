@@ -8,13 +8,16 @@ require __DIR__ . '/../include/skipif.inc';
 <?php
 require __DIR__ . '/../include/bootstrap.php';
 
+const FILE = __DIR__ . '/output.txt';
 use  Swoole\Process;
 
-$sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+$process = new Process('python_process', true);
+$pid = $process->start();
 
-$process = new Process(function (swoole_process $worker) use ($sockets) {
-    fclose($sockets[1]);
-    Process::daemon(1, 1, [null, $sockets[0], $sockets[0]]);
+function python_process(swoole_process $worker)
+{
+    $fp = fopen(FILE, 'a');
+    Process::daemon(1, 1, [null, $fp, $fp]);
 
     fwrite(STDOUT, "ERROR 1\n");
     fwrite(STDOUT, "ERROR 2\n");
@@ -23,17 +26,16 @@ $process = new Process(function (swoole_process $worker) use ($sockets) {
     fwrite(STDERR, "ERROR 4\n");
     fwrite(STDERR, "ERROR 5\n");
     fwrite(STDERR, "END\n");
-}, true);
-$pid = $process->start();
+
+}
 
 Process::wait();
-fclose($sockets[0]);
 
-while (true) {
-    $fp = $sockets[1];
+$fp = fopen(FILE, 'r');
+for ($i = 0; $i < 100; $i++) {
     $line = fgets($fp);
     if (empty($line)) {
-        break;
+        usleep(100000);
     } else {
         echo $line;
         if ($line == "END\n") {
@@ -41,6 +43,7 @@ while (true) {
         }
     }
 }
+unlink(FILE);
 
 ?>
 --EXPECT--

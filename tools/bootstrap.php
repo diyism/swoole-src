@@ -4,7 +4,7 @@
  *
  * @link     https://www.swoole.com
  * @contact  team@swoole.com
- * @license  https://github.com/swoole/swoole-src/blob/master/LICENSE
+ * @license  https://github.com/swoole/library/blob/master/LICENSE
  */
 
 define('ROOT_DIR', dirname(__DIR__));
@@ -123,20 +123,6 @@ function scan_dir(string $dir, callable $filter = null): array
     return array_values($filter ? array_filter($files, $filter) : $files);
 }
 
-function scan_dir_recursive(string $dir, callable $filter = null): array
-{
-    $result = [];
-    $files = scan_dir($dir, $filter);
-    foreach ($files as $f) {
-        if (is_dir($f)) {
-            $result = array_merge($result, scan_dir_recursive($f, $filter));
-        } else {
-            $result[] = $f;
-        }
-    }
-    return $result;
-}
-
 function file_size(string $filename, int $decimals = 2): string
 {
     $bytes = filesize($filename);
@@ -176,20 +162,4 @@ function swoole_source_list(array $ext_list = [], array $excepts = []): array
     sort($source_list);
 
     return $source_list;
-}
-
-function swoole_library_files()
-{
-    $files = [];
-
-    $file_spl_objects = new \RecursiveIteratorIterator(
-        new \RecursiveDirectoryIterator(LIBRARY_SRC_DIR, \RecursiveDirectoryIterator::SKIP_DOTS),
-        \RecursiveIteratorIterator::LEAVES_ONLY
-    );
-
-    foreach ($file_spl_objects as $full_file_name => $file_spl_object) {
-        $files[] = str_replace(LIBRARY_SRC_DIR . '/', '', $full_file_name);
-    }
-
-    return $files;
 }

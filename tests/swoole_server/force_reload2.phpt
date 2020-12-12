@@ -22,8 +22,7 @@ $pm->childFunc = function () use ($pm,$atomic) {
     $serv = new Server('127.0.0.1', $pm->getFreePort(), SWOOLE_BASE);
     $serv->set([
         "worker_num" => 2,
-        "max_wait_time" => 1,
-        'enable_coroutine' => false,
+        "max_wait_time" => 1
     ]);
     $serv->on("WorkerStart", function (Server $server, $worker_id) use ($pm, $atomic) {
         $pm->wakeup();        
@@ -53,10 +52,10 @@ $pm->run();
 %s
 1 [%s] start to reload
 [%s]	INFO	reload workers
-[%s]	WARNING	ProcessPool_kill_timeout_worker: swKill(%d, SIGKILL) [%d]
-[%s]	WARNING	ProcessPool_kill_timeout_worker: swKill(%d, SIGKILL) [%d]
-[%s]	WARNING	wait: worker#%d abnormal exit, status=0, signal=9
-[%s]	WARNING	wait: worker#%d abnormal exit, status=0, signal=9
+[%s]	WARNING	swProcessPool_kill_timeout_worker: swKill(%d, SIGKILL) [%d]
+[%s]	WARNING	swProcessPool_kill_timeout_worker: swKill(%d, SIGKILL) [%d]
+[%s]	WARNING	swProcessPool_wait: worker#%d abnormal exit, status=0, signal=9
+[%s]	WARNING	swProcessPool_wait: worker#%d abnormal exit, status=0, signal=9
 %s
 %s
 [%s]	INFO	Server is shutdown now

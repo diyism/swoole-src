@@ -14,8 +14,7 @@ $pm->parentFunc = function ($pid) use ($pm) {
             $conn->send(json_encode(['data' => 'hello']));
             $timeout = ms_random(0.1, 1);
             $s = microtime(true);
-            $case = mt_rand(0, 2);
-            switch ($case) {
+            switch (mt_rand(0, 2)) {
                 case 0:
                     $ret = $conn->recv(1024, $timeout);
                     break;
@@ -27,7 +26,7 @@ $pm->parentFunc = function ($pid) use ($pm) {
                     break;
             }
             time_approximate($timeout, microtime(true) - $s);
-            Assert::assert($ret === false, "[case=$case]");
+            Assert::assert($ret === false);
             Assert::assert($conn->errCode == SOCKET_ETIMEDOUT);
         });
     }

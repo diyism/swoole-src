@@ -43,7 +43,6 @@ $pm->childFunc = function () use ($pm) {
                 } else if ($frame == '') {
                     break;
                 } else {
-                    Assert::greaterThan($frame->fd, 0);
                     $ws->push("Hello {$frame->data}!");
                     $ws->push("How are you, {$frame->data}?");
                 }
