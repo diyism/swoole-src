@@ -17,10 +17,12 @@
 #include "swoole_server.h"
 #include "swoole_hash.h"
 #include "swoole_util.h"
+#include "swoole_socket.h"
 
 #ifdef SW_USE_HTTP3
 #include "swoole_quic_openssl.h"
 #include "swoole_http3.h"
+#include "swoole_ssl.h"
 #endif
 
 #include <cassert>
@@ -791,6 +793,45 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
             }
         }
     }
+
+#ifdef SW_USE_HTTP3
+    // Phase 7.2: Register HTTP/3 QUIC listener to Reactor
+    if (serv->private_data_1 && reactor_id == 0) {  // Only register in first reactor thread
+        swoole::http3::Server *h3_server = (swoole::http3::Server *) serv->private_data_1;
+
+        // Find the primary port with HTTP/3 enabled
+        for (auto ls : serv->ports) {
+            if (!ls->open_http3_protocol) {
+                continue;
+            }
+
+            // Get SSL context for QUIC
+            if (!ls->ssl_context || !ls->ssl_context->ready()) {
+                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SSL_BAD_CLIENT, "SSL context not ready for HTTP/3 on port %d", ls->port);
+                return SW_ERR;
+            }
+            SSL_CTX *ssl_ctx = ls->ssl_context->get_context();
+
+            // Get host name from ListenPort
+            const char *host_str = ls->host.empty() ? "0.0.0.0" : ls->host.c_str();
+
+            // Bind QUIC listener
+            if (!h3_server->bind(host_str, ls->port, ssl_ctx)) {
+                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to bind HTTP/3 server to %s:%d", host_str, ls->port);
+                return SW_ERR;
+            }
+
+            // Register to Reactor
+            if (!h3_server->quic_server->register_to_reactor(reactor)) {
+                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to register HTTP/3 listener to reactor");
+                return SW_ERR;
+            }
+
+            swoole_trace_log(SW_TRACE_SERVER, "HTTP/3 listener registered on %s:%d", host_str, ls->port);
+            break;  // Only register first HTTP/3 port
+        }
+    }
+#endif
 
     serv->init_reactor(reactor);
     serv->init_pipe_sockets(&message_bus);

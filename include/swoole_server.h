@@ -1086,6 +1086,14 @@ class Server {
      */
     uint8_t http_compression_level = 0;
     uint32_t compression_min_length;
+#ifdef SW_USE_HTTP3
+    /**
+     * HTTP/3 settings (Phase 7.1)
+     */
+    uint32_t http3_max_field_section_size = 65536;  // 64KB
+    uint32_t http3_qpack_max_table_capacity = 4096;  // 4KB
+    uint32_t http3_qpack_blocked_streams = 100;
+#endif
     /**
      * master process pid
      */

@@ -23,6 +23,10 @@
 
 #include "swoole_api.h"
 
+#ifdef SW_USE_HTTP3
+#include "swoole_http3.h"
+#endif
+
 #include <cassert>
 
 using swoole::network::Address;
@@ -443,6 +447,29 @@ int Server::start_check() {
         if (port->open_websocket_protocol) {
             port->websocket_settings.compression = websocket_compression;
         }
+#ifdef SW_USE_HTTP3
+        // Phase 7.2: Initialize HTTP/3 server if enabled
+        if (port->open_http3_protocol && !private_data_1) {
+            swoole::http3::Server *h3_server = new swoole::http3::Server();
+            if (!h3_server) {
+                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to create HTTP/3 server");
+                return SW_ERR;
+            }
+
+            // Store HTTP/3 server instance in private_data_1
+            private_data_1 = h3_server;
+
+            // Set Swoole Server reference
+            h3_server->set_server(this);
+
+            // Apply HTTP/3 settings
+            h3_server->max_field_section_size = http3_max_field_section_size;
+            h3_server->qpack_max_table_capacity = http3_qpack_max_table_capacity;
+            h3_server->qpack_blocked_streams = http3_qpack_blocked_streams;
+
+            swoole_trace_log(SW_TRACE_SERVER, "HTTP/3 server created for port %d", port->port);
+        }
+#endif
     }
 
     return SW_OK;

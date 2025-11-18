@@ -365,6 +365,16 @@ static PHP_METHOD(swoole_server_port, set) {
             port->open_http_protocol = true;
         }
     }
+#ifdef SW_USE_HTTP3
+    // http3 protocol (Phase 7.1)
+    if (php_swoole_array_get_value(vht, "enable_http3", ztmp) ||
+        php_swoole_array_get_value(vht, "open_http3_protocol", ztmp)) {
+        port->open_http3_protocol = zval_is_true(ztmp);
+        if (port->open_http3_protocol) {
+            port->open_http_protocol = true;
+        }
+    }
+#endif
     // buffer: mqtt protocol
     if (php_swoole_array_get_value(vht, "open_mqtt_protocol", ztmp)) {
         port->open_mqtt_protocol = zval_is_true(ztmp);

@@ -2292,6 +2292,22 @@ static PHP_METHOD(swoole_server, set) {
     }
 #endif
 
+#ifdef SW_USE_HTTP3
+    // HTTP/3 settings (Phase 7.1)
+    if (php_swoole_array_get_value(vht, "http3_max_field_section_size", ztmp)) {
+        zend_long v = zval_get_long(ztmp);
+        serv->http3_max_field_section_size = SW_MAX(0, SW_MIN(v, UINT32_MAX));
+    }
+    if (php_swoole_array_get_value(vht, "http3_qpack_max_table_capacity", ztmp)) {
+        zend_long v = zval_get_long(ztmp);
+        serv->http3_qpack_max_table_capacity = SW_MAX(0, SW_MIN(v, UINT32_MAX));
+    }
+    if (php_swoole_array_get_value(vht, "http3_qpack_blocked_streams", ztmp)) {
+        zend_long v = zval_get_long(ztmp);
+        serv->http3_qpack_blocked_streams = SW_MAX(0, SW_MIN(v, UINT32_MAX));
+    }
+#endif
+
     // temporary directory for HTTP uploaded file.
     if (php_swoole_array_get_value(vht, "upload_tmp_dir", ztmp)) {
         zend::String str_v(ztmp);
