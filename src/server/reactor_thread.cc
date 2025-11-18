@@ -18,6 +18,11 @@
 #include "swoole_hash.h"
 #include "swoole_util.h"
 
+#ifdef SW_USE_HTTP3
+#include "swoole_quic_openssl.h"
+#include "swoole_http3.h"
+#endif
+
 #include <cassert>
 
 using std::unordered_map;
@@ -113,9 +118,19 @@ _do_recvfrom:
         }
     }
 
-#ifdef SW_SUPPORT_DTLS
     auto port = static_cast<ListenPort *>(server_sock->object);
 
+#ifdef SW_USE_HTTP3
+    // Check if this is an HTTP/3 port
+    if (port->open_http3_protocol) {
+        // HTTP/3 packets are handled by QUIC Listener's Reactor callback
+        // This should not happen as HTTP/3 uses its own read_handler
+        swoole_trace_log(SW_TRACE_SERVER, "HTTP/3 packet received on fd=%d (handled by QUIC)", fd);
+        goto _do_recvfrom;  // Continue receiving more packets
+    }
+#endif
+
+#ifdef SW_SUPPORT_DTLS
     if (port->is_dtls()) {
         dtls::Session *session = serv->accept_dtls_connection(port, &pkt->socket_addr);
         if (!session) {

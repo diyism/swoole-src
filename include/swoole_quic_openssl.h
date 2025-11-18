@@ -121,6 +121,14 @@ struct Stream {
     bool close(uint64_t error_code = SW_QUIC_NO_ERROR);
 };
 
+// Forward declaration for Swoole types
+namespace swoole {
+class Reactor;
+namespace network {
+class Socket;
+}
+}
+
 // QUIC Listener (Server-side only)
 struct Listener {
     SSL_CTX *ssl_ctx;
@@ -147,6 +155,11 @@ struct Listener {
     // User data
     void *user_data;
 
+    // ===== Swoole Reactor Integration =====
+    swoole::Reactor *reactor;              // Swoole Reactor instance
+    swoole::network::Socket *swoole_socket; // Swoole Socket wrapper
+    bool reactor_registered;               // Whether registered to reactor
+
     Listener();
     ~Listener();
 
@@ -162,8 +175,24 @@ struct Listener {
     // Accept incoming QUIC connection
     Connection* accept_connection();
 
-    // Run event loop (compatibility with ngtcp2 API)
-    void run();
+    // ===== Deprecated: Old blocking event loop =====
+    // void run();  // Removed - use register_to_reactor() instead
+
+    // ===== New: Swoole Reactor Integration =====
+    // Register to Swoole Reactor for async I/O
+    bool register_to_reactor(swoole::Reactor *reactor);
+
+    // Unregister from Reactor
+    bool unregister_from_reactor();
+
+    // Process incoming UDP packet (called by Reactor)
+    bool process_packet();
+
+    // Process all active connections (called by Reactor)
+    void process_connections();
+
+    // Static callback for Reactor events
+    static int on_reactor_read(swoole::Reactor *reactor, swoole::network::Socket *socket);
 
     // Close listener
     bool close();

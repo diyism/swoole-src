@@ -222,6 +222,10 @@ struct ListenPort {
      */
     bool open_http2_protocol = false;
     /**
+     * built-in http3.0 protocol
+     */
+    bool open_http3_protocol = false;
+    /**
      * built-in websocket protocol
      */
     bool open_websocket_protocol = false;
@@ -266,6 +270,11 @@ struct ListenPort {
 #ifdef SW_SUPPORT_DTLS
     std::unordered_map<int, dtls::Session *> *dtls_sessions = nullptr;
     dtls::Session *create_dtls_session(network::Socket *sock) const;
+#endif
+
+#ifdef SW_USE_HTTP3
+    // HTTP/3 QUIC listener
+    swoole::quic::Listener *http3_listener = nullptr;
 #endif
 
     bool ssl_is_enable() const {

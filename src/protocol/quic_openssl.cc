@@ -265,6 +265,11 @@ Listener::Listener() {
     on_stream_data = nullptr;
     user_data = nullptr;
 
+    // Swoole Reactor integration
+    reactor = nullptr;
+    swoole_socket = nullptr;
+    reactor_registered = false;
+
     swoole_trace_log(SW_TRACE_QUIC, "Listener created");
 }
 
@@ -401,6 +406,15 @@ Connection* Listener::accept_connection() {
 }
 
 bool Listener::close() {
+    // Unregister from Reactor first
+    unregister_from_reactor();
+
+    // Clean up all active connections
+    for (auto conn : active_connections) {
+        delete conn;
+    }
+    active_connections.clear();
+
     if (ssl_listener) {
         SSL_free(ssl_listener);
         ssl_listener = nullptr;
@@ -434,6 +448,11 @@ bool Listener::bind(const char *host, int port) {
     return listen((struct sockaddr *)&addr, sizeof(addr));
 }
 
+// ============================================================================
+// DEPRECATED: Old blocking event loop - DO NOT USE
+// This method has been replaced with Swoole Reactor integration
+// ============================================================================
+#if 0
 void Listener::run() {
     swoole_trace_log(SW_TRACE_QUIC, "Starting QUIC listener event loop");
 
@@ -524,6 +543,145 @@ void Listener::run() {
     }
 
     swoole_trace_log(SW_TRACE_QUIC, "Event loop exited");
+}
+#endif
+
+// ============================================================================
+// NEW: Swoole Reactor Integration
+// ============================================================================
+
+bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
+    if (!_reactor) {
+        swoole_warning("Reactor is null");
+        return false;
+    }
+
+    if (!ssl_listener || udp_fd < 0) {
+        swoole_error_log(SW_ERROR_WRONG_OPERATION, SW_ERROR_WRONG_OPERATION,
+                        "Listener not initialized. Call listen() first.");
+        return false;
+    }
+
+    if (reactor_registered) {
+        swoole_warning("Listener already registered to reactor");
+        return true;  // Already registered
+    }
+
+    // Set socket to non-blocking mode
+    int flags = fcntl(udp_fd, F_GETFL, 0);
+    if (fcntl(udp_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        swoole_sys_warning("fcntl(O_NONBLOCK) failed");
+        return false;
+    }
+
+    // Create Swoole Socket wrapper
+    swoole_socket = new swoole::network::Socket();
+    if (!swoole_socket) {
+        swoole_warning("Failed to create Swoole Socket");
+        return false;
+    }
+
+    swoole_socket->fd = udp_fd;
+    swoole_socket->socket_type = SW_SOCK_UDP;
+    swoole_socket->fdtype = SW_FD_UDP;
+    swoole_socket->object = this;  // Bind Listener to socket
+    swoole_socket->read_handler = on_reactor_read;
+    swoole_socket->set_nonblock();
+
+    // Register to Reactor for read events
+    if (_reactor->add(swoole_socket, SW_EVENT_READ) < 0) {
+        swoole_warning("Failed to add QUIC socket to reactor");
+        delete swoole_socket;
+        swoole_socket = nullptr;
+        return false;
+    }
+
+    reactor = _reactor;
+    reactor_registered = true;
+
+    swoole_trace_log(SW_TRACE_QUIC, "QUIC Listener registered to Reactor, fd=%d", udp_fd);
+    return true;
+}
+
+bool Listener::unregister_from_reactor() {
+    if (!reactor_registered || !reactor || !swoole_socket) {
+        return true;  // Already unregistered
+    }
+
+    reactor->del(swoole_socket);
+    delete swoole_socket;
+    swoole_socket = nullptr;
+    reactor = nullptr;
+    reactor_registered = false;
+
+    swoole_trace_log(SW_TRACE_QUIC, "QUIC Listener unregistered from Reactor");
+    return true;
+}
+
+bool Listener::process_packet() {
+    // Try to accept new connection
+    Connection *conn = accept_connection();
+    if (conn) {
+        swoole_trace_log(SW_TRACE_QUIC, "Connection accepted via Reactor");
+
+        // Set up stream callbacks on the connection
+        if (on_stream_open) {
+            conn->on_stream_open = on_stream_open;
+        }
+        if (on_stream_close) {
+            conn->on_stream_close = on_stream_close;
+        }
+        if (on_stream_data) {
+            conn->on_stream_data = on_stream_data;
+        }
+
+        // Add to active connections list
+        active_connections.push_back(conn);
+
+        // Trigger connection callback
+        if (on_connection) {
+            on_connection(this, conn);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+void Listener::process_connections() {
+    // Process events for all active connections
+    for (auto it = active_connections.begin(); it != active_connections.end(); ) {
+        Connection *conn = *it;
+
+        // Process streams and I/O for this connection
+        if (!conn->process_events()) {
+            swoole_trace_log(SW_TRACE_QUIC, "Connection closed, removing from active list");
+            it = active_connections.erase(it);
+            delete conn;
+            continue;
+        }
+
+        ++it;
+    }
+}
+
+int Listener::on_reactor_read(swoole::Reactor *reactor, swoole::network::Socket *socket) {
+    Listener *listener = (Listener *) socket->object;
+    if (!listener) {
+        swoole_warning("Listener object is null in reactor callback");
+        return SW_ERR;
+    }
+
+    swoole_trace_log(SW_TRACE_QUIC, "Reactor read event: processing QUIC packets");
+
+    // Process incoming packet (may accept new connection)
+    listener->process_packet();
+
+    // Process all active connections
+    listener->process_connections();
+
+    return SW_OK;
 }
 
 // ============================================================================
