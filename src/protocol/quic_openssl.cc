@@ -269,6 +269,7 @@ Listener::Listener() {
     reactor = nullptr;
     swoole_socket = nullptr;
     reactor_registered = false;
+    swoole_server = nullptr;
 
     swoole_trace_log(SW_TRACE_QUIC, "Listener created");
 }
@@ -717,6 +718,12 @@ Connection::Connection() {
 
     user_data = nullptr;
 
+    // Swoole integration
+    swoole_conn = nullptr;
+    session_id = 0;
+    server_fd = -1;
+    reactor = nullptr;
+
     is_server = 1;
     handshake_completed = 0;
     draining = 0;
@@ -768,6 +775,25 @@ bool Connection::init_from_ssl(SSL *ssl_conn, SSL_CTX *ctx) {
     // TODO: Get remote address from SSL object if available
 
     swoole_trace_log(SW_TRACE_QUIC, "Connection initialized from SSL object with HTTP/3 configuration");
+    return true;
+}
+
+bool Connection::bind_swoole_connection(swoole::Connection *conn, swoole::SessionId sid, int fd, swoole::Reactor *r) {
+    if (!conn) {
+        swoole_warning("Swoole connection is null");
+        return false;
+    }
+
+    swoole_conn = conn;
+    session_id = sid;
+    server_fd = fd;
+    reactor = r;
+
+    // Bind QUIC connection to Swoole connection
+    swoole_conn->object = this;
+
+    swoole_trace_log(SW_TRACE_QUIC, "QUIC connection bound to Swoole connection, session_id=%ld, fd=%d",
+                    session_id, server_fd);
     return true;
 }
 

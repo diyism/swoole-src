@@ -160,6 +160,9 @@ struct Listener {
     swoole::network::Socket *swoole_socket; // Swoole Socket wrapper
     bool reactor_registered;               // Whether registered to reactor
 
+    // Swoole Server integration (for creating connections)
+    class swoole::Server *swoole_server;   // Associated Swoole Server instance
+
     Listener();
     ~Listener();
 
@@ -236,6 +239,12 @@ struct Connection {
     // User data
     void *user_data;
 
+    // ===== Swoole Connection Integration =====
+    swoole::Connection *swoole_conn;    // Associated Swoole connection
+    swoole::SessionId session_id;        // Swoole session ID
+    int server_fd;                       // Server socket fd (for Swoole)
+    swoole::Reactor *reactor;            // Reactor instance
+
     // Flags
     uchar is_server : 1;
     uchar handshake_completed : 1;
@@ -243,6 +252,10 @@ struct Connection {
 
     Connection();
     ~Connection();
+
+    // ===== Swoole Integration Methods =====
+    // Bind to Swoole connection (called after accepting QUIC connection)
+    bool bind_swoole_connection(swoole::Connection *conn, swoole::SessionId sid, int fd, swoole::Reactor *r);
 
     // Initialize from accepted SSL connection
     bool init_from_ssl(SSL *ssl_conn, SSL_CTX *ctx);
