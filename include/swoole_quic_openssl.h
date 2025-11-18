@@ -188,6 +188,9 @@ struct Listener {
     // Unregister from Reactor
     bool unregister_from_reactor();
 
+    // Set Swoole Server instance (must be called before processing connections)
+    void set_server(class swoole::Server *server);
+
     // Process incoming UDP packet (called by Reactor)
     bool process_packet();
 

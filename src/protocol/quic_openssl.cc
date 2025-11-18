@@ -619,6 +619,11 @@ bool Listener::unregister_from_reactor() {
     return true;
 }
 
+void Listener::set_server(swoole::Server *server) {
+    swoole_server = server;
+    swoole_trace_log(SW_TRACE_QUIC, "Swoole Server set on QUIC Listener");
+}
+
 bool Listener::process_packet() {
     // Try to accept new connection
     Connection *conn = accept_connection();
@@ -634,6 +639,18 @@ bool Listener::process_packet() {
         }
         if (on_stream_data) {
             conn->on_stream_data = on_stream_data;
+        }
+
+        // ===== Swoole Server Integration =====
+        if (swoole_server && reactor) {
+            // Store Swoole Server and Reactor references for later use
+            // The actual Swoole Connection will be created by the HTTP/3 layer
+            // when it calls bind_swoole_connection()
+            conn->reactor = reactor;
+            conn->server_fd = udp_fd;
+
+            swoole_trace_log(SW_TRACE_QUIC,
+                "QUIC connection prepared for Swoole integration, server_fd=%d", udp_fd);
         }
 
         // Add to active connections list

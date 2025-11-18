@@ -543,6 +543,17 @@ Connection::Connection(swoole::quic::Connection *qc)
 }
 
 Connection::~Connection() {
+    // ===== Swoole Server Integration: onClose Event =====
+    // Notify Swoole when HTTP/3 connection closes
+    if (quic_conn && quic_conn->swoole_conn) {
+        swoole_trace_log(SW_TRACE_HTTP3,
+            "HTTP/3 connection closing, session_id=%ld", quic_conn->session_id);
+
+        // TODO: Notify Swoole Server of connection close
+        // This would call: swoole_server->notify(quic_conn->swoole_conn, SW_SERVER_EVENT_CLOSE);
+        // For now, the connection cleanup is handled by the QUIC layer
+    }
+
     for (auto &pair : streams) {
         delete pair.second;
     }
@@ -867,7 +878,8 @@ swoole::http3::Server::Server()
       on_connection(nullptr),
       on_request(nullptr),
       on_stream_close(nullptr),
-      user_data(nullptr) {
+      user_data(nullptr),
+      swoole_server(nullptr) {
 
     memset(&settings, 0, sizeof(settings));
     Connection::setup_settings(&settings);
@@ -935,6 +947,15 @@ bool swoole::http3::Server::bind(const char *host, int port, SSL_CTX *ssl_ctx) {
     return true;
 }
 
+void swoole::http3::Server::set_server(swoole::Server *server) {
+    swoole_server = server;
+    // Also set it on the underlying QUIC listener
+    if (quic_server) {
+        quic_server->set_server(server);
+    }
+    swoole_trace_log(SW_TRACE_HTTP3, "Swoole Server set on HTTP/3 Server");
+}
+
 Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *quic_conn) {
     static int call_count = 0;
     call_count++;
@@ -981,6 +1002,22 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
 
     conn->user_data = this;
     connections[quic_conn] = conn;
+
+    // ===== Swoole Server Integration =====
+    // TODO: Full Swoole Connection creation requires fd allocation system
+    // For now, we prepare the QUIC connection for Swoole integration
+    if (swoole_server && quic_conn->reactor) {
+        swoole_trace_log(SW_TRACE_HTTP3,
+            "HTTP/3 connection accepted, preparing for Swoole integration");
+
+        // The QUIC connection already has reactor and server_fd set from Listener::process_packet()
+        // Full integration (creating Swoole Connection, allocating SessionId, etc.)
+        // will be completed in a future phase when we implement proper fd management
+        // for multiplexed QUIC connections
+
+        // For now, trigger onConnect notification via callback
+        // The application layer can handle Swoole event notifications
+    }
 
     if (on_connection) {
         on_connection(this, conn);

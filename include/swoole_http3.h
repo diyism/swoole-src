@@ -214,6 +214,9 @@ struct Server {
     // User data
     void *user_data;
 
+    // Swoole Server integration
+    class swoole::Server *swoole_server;
+
     Server();
     ~Server();
 
@@ -221,6 +224,7 @@ struct Server {
     bool start();
     void stop();
 
+    void set_server(class swoole::Server *server);
     Connection* accept_connection(swoole::quic::Connection *quic_conn);
     bool remove_connection(Connection *conn);
 };
