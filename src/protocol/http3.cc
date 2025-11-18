@@ -93,6 +93,93 @@ nghttp3_nv swoole::http3::make_nv(const std::string &name, const std::string &va
     return nv;
 }
 
+// ===== Phase 6.2: HTTP/3 Request Serialization =====
+
+// Helper: Escape JSON string
+static std::string json_escape(const std::string &input) {
+    std::string output;
+    output.reserve(input.length());
+
+    for (char c : input) {
+        switch (c) {
+        case '"':  output += "\\\""; break;
+        case '\\': output += "\\\\"; break;
+        case '\b': output += "\\b"; break;
+        case '\f': output += "\\f"; break;
+        case '\n': output += "\\n"; break;
+        case '\r': output += "\\r"; break;
+        case '\t': output += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                // Control characters
+                char buf[7];
+                snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                output += buf;
+            } else {
+                output += c;
+            }
+        }
+    }
+
+    return output;
+}
+
+// Serialize HTTP/3 Stream request to JSON format
+static String* serialize_http3_request_to_json(Stream *s) {
+    std::string json = "{";
+
+    // Add method
+    json += "\"method\":\"" + json_escape(s->method) + "\",";
+
+    // Add path
+    json += "\"path\":\"" + json_escape(s->path) + "\",";
+
+    // Add scheme
+    json += "\"scheme\":\"" + json_escape(s->scheme) + "\",";
+
+    // Add authority
+    json += "\"authority\":\"" + json_escape(s->authority) + "\",";
+
+    // Add stream_id
+    char stream_id_buf[32];
+    snprintf(stream_id_buf, sizeof(stream_id_buf), "%ld", s->stream_id);
+    json += "\"stream_id\":" + std::string(stream_id_buf) + ",";
+
+    // Add headers
+    json += "\"headers\":{";
+    bool first_header = true;
+    for (const auto &hf : s->headers) {
+        // Skip pseudo-headers (already included above)
+        if (hf.name[0] == ':') {
+            continue;
+        }
+
+        if (!first_header) {
+            json += ",";
+        }
+        json += "\"" + json_escape(hf.name) + "\":\"" + json_escape(hf.value) + "\"";
+        first_header = false;
+    }
+    json += "},";
+
+    // Add body
+    if (s->body && s->body->length > 0) {
+        json += "\"body\":\"" + json_escape(std::string(s->body->str, s->body->length)) + "\"";
+    } else {
+        json += "\"body\":\"\"";
+    }
+
+    json += "}";
+
+    // Create Swoole String
+    String *result = new String(json.length());
+    result->append(json.c_str(), json.length());
+
+    swoole_trace_log(SW_TRACE_HTTP3, "Serialized HTTP/3 request to JSON: %zu bytes", result->length);
+
+    return result;
+}
+
 // ==================== HTTP/3 Stream Implementation ====================
 
 Stream::Stream(int64_t id, Connection *c, swoole::quic::Stream *qs)
@@ -1011,10 +1098,46 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
                     swoole_conn->session_id);
             }
 
-            // TODO Phase 6.2: Serialize request and dispatch to Worker
-            // - Serialize HTTP/3 request to JSON format
-            // - Create RecvData packet
-            // - Call server->swoole_server->factory->dispatch()
+            // ===== Phase 6.2: Request Data Passing to Worker =====
+            // Serialize HTTP/3 request to JSON format
+            String *request_json = serialize_http3_request_to_json(s);
+            if (request_json) {
+                // Create SendData packet for Worker dispatch
+                SendData send_data = {};
+                send_data.info.fd = swoole_conn->session_id;  // session_id as fd
+                send_data.info.len = request_json->length;
+                send_data.info.type = SW_SERVER_EVENT_RECV_DATA;
+                send_data.data = request_json->str;
+
+                // Get reactor_id from current thread
+                if (server->swoole_server->gs->event_workers.reactor_threads) {
+                    send_data.info.reactor_id = SwooleTG.id;
+                } else {
+                    send_data.info.reactor_id = 0;
+                }
+
+                // Get server_fd (listener fd)
+                send_data.info.server_fd = c->quic_conn->get_virtual_fd();
+
+                swoole_trace_log(SW_TRACE_HTTP3,
+                    "Dispatching HTTP/3 request to Worker: session_id=%ld, len=%u, reactor_id=%d",
+                    send_data.info.fd, send_data.info.len, send_data.info.reactor_id);
+
+                // Dispatch to Worker process
+                bool dispatched = server->swoole_server->factory->dispatch(&send_data);
+                if (dispatched) {
+                    swoole_trace_log(SW_TRACE_HTTP3,
+                        "HTTP/3 request dispatched successfully: stream_id=%ld", s->stream_id);
+                } else {
+                    swoole_warning("Failed to dispatch HTTP/3 request: session_id=%ld, stream_id=%ld",
+                        swoole_conn->session_id, s->stream_id);
+                }
+
+                // Clean up JSON buffer
+                delete request_json;
+            } else {
+                swoole_warning("Failed to serialize HTTP/3 request: stream_id=%ld", s->stream_id);
+            }
         }
 
         // Keep existing on_request callback for non-Swoole integration mode
