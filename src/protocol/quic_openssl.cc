@@ -624,6 +624,162 @@ void Listener::set_server(swoole::Server *server) {
     swoole_trace_log(SW_TRACE_QUIC, "Swoole Server set on QUIC Listener");
 }
 
+// ============================================================================
+// Phase 5: Virtual FD System Implementation
+// ============================================================================
+
+int Listener::create_virtual_fd_pair(int fds[2]) {
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+        swoole_sys_warning("socketpair() failed");
+        return SW_ERR;
+    }
+
+    // Set both ends to non-blocking mode
+    swoole_set_nonblock(fds[0]);
+    swoole_set_nonblock(fds[1]);
+
+    swoole_trace_log(SW_TRACE_QUIC, "Created virtual fd pair: [%d, %d]", fds[0], fds[1]);
+    return SW_OK;
+}
+
+void Listener::cleanup_virtual_fd(int virtual_fd) {
+    std::lock_guard<std::mutex> lock(virtual_fd_mutex);
+
+    auto it = virtual_fd_map.find(virtual_fd);
+    if (it != virtual_fd_map.end()) {
+        swoole_trace_log(SW_TRACE_QUIC, "Removing virtual fd %d from map", virtual_fd);
+        virtual_fd_map.erase(it);
+    }
+}
+
+swoole::Connection* Listener::create_swoole_connection(Connection *qc) {
+    if (!swoole_server) {
+        swoole_warning("Cannot create Swoole connection: swoole_server is null");
+        return nullptr;
+    }
+
+    if (!reactor) {
+        swoole_warning("Cannot create Swoole connection: reactor is null");
+        return nullptr;
+    }
+
+    // Create socketpair for virtual fd
+    int fds[2];
+    if (create_virtual_fd_pair(fds) != SW_OK) {
+        return nullptr;
+    }
+
+    // Use fds[0] as the virtual fd for this QUIC connection
+    int virtual_fd = fds[0];
+
+    // Create Socket object for Swoole
+    swoole::network::Socket *sock = new swoole::network::Socket(virtual_fd, SW_FD_SESSION, SW_SOCK_STREAM);
+    if (!sock) {
+        swoole_sys_warning("Failed to create Socket object");
+        close(fds[0]);
+        close(fds[1]);
+        return nullptr;
+    }
+
+    sock->socket_type = SW_SOCK_UDP;  // Mark as UDP-based
+    sock->object = nullptr;  // Will be set by add_connection
+
+    // Store the pair fd in QUIC connection for cleanup
+    qc->virtual_fd_pair[0] = fds[0];
+    qc->virtual_fd_pair[1] = fds[1];
+    qc->has_virtual_fd = true;
+
+    // Find the ListenPort for this listener
+    swoole::ListenPort *port = nullptr;
+    for (auto ls : swoole_server->ports) {
+        if (ls->socket->fd == udp_fd) {
+            port = ls;
+            break;
+        }
+    }
+
+    if (!port) {
+        swoole_warning("Cannot find ListenPort for udp_fd=%d", udp_fd);
+        delete sock;
+        qc->cleanup_virtual_fd();
+        return nullptr;
+    }
+
+    // Add connection to Swoole Server
+    swoole::Connection *conn = swoole_server->add_connection(port, sock, udp_fd);
+    if (!conn) {
+        swoole_warning("Failed to add connection to Swoole Server");
+        delete sock;
+        qc->cleanup_virtual_fd();
+        return nullptr;
+    }
+
+    // Bind QUIC connection to Swoole connection
+    qc->bind_swoole_connection(conn, conn->session_id, udp_fd, reactor);
+
+    // Store virtual fd mapping for reverse lookup
+    {
+        std::lock_guard<std::mutex> lock(virtual_fd_mutex);
+        virtual_fd_map[virtual_fd] = qc;
+    }
+
+    swoole_trace_log(SW_TRACE_QUIC,
+        "Created Swoole connection for QUIC connection: virtual_fd=%d, session_id=%ld",
+        virtual_fd, conn->session_id);
+
+    return conn;
+}
+
+bool Listener::notify_connect(Connection *qc) {
+    if (!qc->swoole_conn) {
+        swoole_warning("Cannot notify connect: swoole_conn is null");
+        return false;
+    }
+
+    if (!swoole_server) {
+        swoole_warning("Cannot notify connect: swoole_server is null");
+        return false;
+    }
+
+    swoole_trace_log(SW_TRACE_QUIC,
+        "Notifying onConnect for QUIC connection: session_id=%ld, virtual_fd=%d",
+        qc->session_id, qc->get_virtual_fd());
+
+    // Trigger onConnect event through Swoole Server
+    swoole_server->notify(qc->swoole_conn, SW_SERVER_EVENT_CONNECT);
+
+    return true;
+}
+
+bool Listener::notify_close(Connection *qc, uint64_t error_code) {
+    if (!qc->swoole_conn) {
+        swoole_trace_log(SW_TRACE_QUIC, "Cannot notify close: swoole_conn is null");
+        return false;
+    }
+
+    if (!swoole_server) {
+        swoole_warning("Cannot notify close: swoole_server is null");
+        return false;
+    }
+
+    swoole_trace_log(SW_TRACE_QUIC,
+        "Notifying onClose for QUIC connection: session_id=%ld, virtual_fd=%d, error_code=%lu",
+        qc->session_id, qc->get_virtual_fd(), error_code);
+
+    // Cleanup virtual fd mapping
+    int virtual_fd = qc->get_virtual_fd();
+    if (virtual_fd >= 0) {
+        cleanup_virtual_fd(virtual_fd);
+    }
+
+    // Trigger onClose event through Swoole Server
+    swoole_server->notify(qc->swoole_conn, SW_SERVER_EVENT_CLOSE);
+
+    return true;
+}
+
+// ============================================================================
+
 bool Listener::process_packet() {
     // Try to accept new connection
     Connection *conn = accept_connection();
@@ -641,16 +797,27 @@ bool Listener::process_packet() {
             conn->on_stream_data = on_stream_data;
         }
 
-        // ===== Swoole Server Integration =====
+        // ===== Phase 5: Virtual FD System Integration =====
         if (swoole_server && reactor) {
-            // Store Swoole Server and Reactor references for later use
-            // The actual Swoole Connection will be created by the HTTP/3 layer
-            // when it calls bind_swoole_connection()
+            // Create Swoole Connection with virtual fd
+            swoole::Connection *swoole_conn = create_swoole_connection(conn);
+            if (swoole_conn) {
+                swoole_trace_log(SW_TRACE_QUIC,
+                    "Swoole connection created for QUIC connection: session_id=%ld, virtual_fd=%d",
+                    conn->session_id, conn->get_virtual_fd());
+
+                // Trigger onConnect event
+                notify_connect(conn);
+            } else {
+                swoole_warning("Failed to create Swoole connection for QUIC connection");
+                // Continue anyway - connection can still work at QUIC level
+                conn->reactor = reactor;
+                conn->server_fd = udp_fd;
+            }
+        } else {
+            // No Swoole Server integration - store reactor/server_fd for potential later use
             conn->reactor = reactor;
             conn->server_fd = udp_fd;
-
-            swoole_trace_log(SW_TRACE_QUIC,
-                "QUIC connection prepared for Swoole integration, server_fd=%d", udp_fd);
         }
 
         // Add to active connections list
@@ -675,6 +842,12 @@ void Listener::process_connections() {
         // Process streams and I/O for this connection
         if (!conn->process_events()) {
             swoole_trace_log(SW_TRACE_QUIC, "Connection closed, removing from active list");
+
+            // Phase 5: Notify Swoole of connection close
+            if (conn->swoole_conn) {
+                notify_close(conn, SW_QUIC_NO_ERROR);
+            }
+
             it = active_connections.erase(it);
             delete conn;
             continue;
@@ -741,6 +914,11 @@ Connection::Connection() {
     server_fd = -1;
     reactor = nullptr;
 
+    // Virtual FD initialization (Phase 5)
+    virtual_fd_pair[0] = -1;
+    virtual_fd_pair[1] = -1;
+    has_virtual_fd = false;
+
     is_server = 1;
     handshake_completed = 0;
     draining = 0;
@@ -750,6 +928,9 @@ Connection::Connection() {
 
 Connection::~Connection() {
     close();
+
+    // Phase 5: Clean up virtual fd
+    cleanup_virtual_fd();
 
     if (send_buffer) {
         sw_free(send_buffer);
@@ -812,6 +993,28 @@ bool Connection::bind_swoole_connection(swoole::Connection *conn, swoole::Sessio
     swoole_trace_log(SW_TRACE_QUIC, "QUIC connection bound to Swoole connection, session_id=%ld, fd=%d",
                     session_id, server_fd);
     return true;
+}
+
+// Phase 5: Virtual FD cleanup
+void Connection::cleanup_virtual_fd() {
+    if (!has_virtual_fd) {
+        return;
+    }
+
+    swoole_trace_log(SW_TRACE_QUIC, "Cleaning up virtual fd pair: [%d, %d]",
+                    virtual_fd_pair[0], virtual_fd_pair[1]);
+
+    if (virtual_fd_pair[0] >= 0) {
+        close(virtual_fd_pair[0]);
+        virtual_fd_pair[0] = -1;
+    }
+
+    if (virtual_fd_pair[1] >= 0) {
+        close(virtual_fd_pair[1]);
+        virtual_fd_pair[1] = -1;
+    }
+
+    has_virtual_fd = false;
 }
 
 Stream* Connection::create_stream(int64_t stream_id) {

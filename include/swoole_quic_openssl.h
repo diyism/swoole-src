@@ -163,6 +163,10 @@ struct Listener {
     // Swoole Server integration (for creating connections)
     class swoole::Server *swoole_server;   // Associated Swoole Server instance
 
+    // Virtual FD management (Phase 5)
+    std::unordered_map<int, Connection*> virtual_fd_map;  // Map virtual fd to QUIC connection
+    std::mutex virtual_fd_mutex;                          // Protect virtual_fd_map
+
     Listener();
     ~Listener();
 
@@ -190,6 +194,18 @@ struct Listener {
 
     // Set Swoole Server instance (must be called before processing connections)
     void set_server(class swoole::Server *server);
+
+    // ===== Phase 5: Virtual FD Methods =====
+    // Create Swoole Connection for QUIC connection
+    swoole::Connection* create_swoole_connection(Connection *qc);
+
+    // Notify Swoole of connection events
+    bool notify_connect(Connection *qc);
+    bool notify_close(Connection *qc, uint64_t error_code);
+
+    // Helper: Create virtual fd pair
+    int create_virtual_fd_pair(int fds[2]);
+    void cleanup_virtual_fd(int virtual_fd);
 
     // Process incoming UDP packet (called by Reactor)
     bool process_packet();
@@ -248,6 +264,10 @@ struct Connection {
     int server_fd;                       // Server socket fd (for Swoole)
     swoole::Reactor *reactor;            // Reactor instance
 
+    // Virtual FD for Swoole integration (Phase 5)
+    int virtual_fd_pair[2];              // [0] = virtual fd for Swoole, [1] = internal fd
+    bool has_virtual_fd;                 // Whether virtual fd pair is created
+
     // Flags
     uchar is_server : 1;
     uchar handshake_completed : 1;
@@ -259,6 +279,10 @@ struct Connection {
     // ===== Swoole Integration Methods =====
     // Bind to Swoole connection (called after accepting QUIC connection)
     bool bind_swoole_connection(swoole::Connection *conn, swoole::SessionId sid, int fd, swoole::Reactor *r);
+
+    // Virtual FD management (Phase 5)
+    int get_virtual_fd() const { return has_virtual_fd ? virtual_fd_pair[0] : -1; }
+    void cleanup_virtual_fd();
 
     // Initialize from accepted SSL connection
     bool init_from_ssl(SSL *ssl_conn, SSL_CTX *ctx);
