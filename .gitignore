@@ -123,3 +123,4 @@ cmake-build-debug/
 build.ninjabuild_log*.txt
 build_*.log
 build_log*.txt
+build.log
