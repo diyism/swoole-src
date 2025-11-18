@@ -364,13 +364,13 @@ void Server::reactor_process_http3_response(EventData *event_data) {
         "[Reactor][HTTP/3] Received response from Worker: session_id=%ld, len=%zu",
         session_id, json_len);
 
-    // Find HTTP/3 server from user_data (set during initialization)
-    if (!http3_server) {
+    // Find HTTP/3 server from Server member (set during initialization)
+    if (!this->private_data_1) {
         swoole_warning("HTTP/3: HTTP/3 server not initialized");
         return;
     }
 
-    http3::Server *h3_server = (http3::Server *) http3_server;
+    http3::Server *h3_server = (http3::Server *) this->private_data_1;
 
     // Parse JSON response (simple manual parsing since we control the format)
     std::string json_str(json_data, json_len);

@@ -41,7 +41,7 @@ $server->set([
 
     // Logging
     'log_level' => SWOOLE_LOG_TRACE,
-    'trace_flags' => SWOOLE_TRACE_HTTP3,
+    // 'trace_flags' => SWOOLE_TRACE_HTTP3,  // Commented: constant not yet defined
 
     // HTTP/3 specific settings (optional)
     'http3_max_field_section_size' => 65536,

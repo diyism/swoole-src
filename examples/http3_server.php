@@ -18,8 +18,8 @@ $server = new Swoole\Http3\Server("0.0.0.0", 443);
 // Configure server settings
 $server->set([
     // SSL certificate and key (required for HTTP/3)
-    'ssl_cert_file' => __DIR__ . '/ssl/cert.pem',
-    'ssl_key_file'  => __DIR__ . '/ssl/key.pem',
+    'ssl_cert_file' => __DIR__ . '/ssl/ssl.crt',
+    'ssl_key_file'  => __DIR__ . '/ssl/ssl.key',
 
     // HTTP/3 specific settings
     'http3_max_field_section_size' => 65536,  // Maximum header size

@@ -1112,7 +1112,7 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
                 send_data.data = request_json->str;
 
                 // Get reactor_id from current thread
-                if (server->swoole_server->gs->event_workers.reactor_threads) {
+                if (server->swoole_server->is_process_mode()) {
                     send_data.info.reactor_id = SwooleTG.id;
                 } else {
                     send_data.info.reactor_id = 0;
@@ -1126,7 +1126,7 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
                     send_data.info.fd, send_data.info.len, send_data.info.reactor_id);
 
                 // Dispatch to Worker process
-                bool dispatched = server->swoole_server->factory->dispatch(&send_data);
+                bool dispatched = server->swoole_server->factory_->dispatch(&send_data);
                 if (dispatched) {
                     swoole_trace_log(SW_TRACE_HTTP3,
                         "HTTP/3 request dispatched successfully: stream_id=%ld", s->stream_id);
@@ -1218,7 +1218,10 @@ bool swoole::http3::Server::start() {
         return false;
     }
 
-    quic_server->run();
+    // Note: The old quic_server->run() blocking event loop has been removed.
+    // QUIC Listener is now integrated with Swoole Reactor (via register_to_reactor).
+    // The Reactor handles all I/O events asynchronously.
+    swoole_trace_log(SW_TRACE_HTTP3, "HTTP/3 Server started (using Reactor integration)");
     return true;
 }
 

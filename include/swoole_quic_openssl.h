@@ -217,7 +217,7 @@ struct Listener {
     void process_connections();
 
     // Static callback for Reactor events
-    static int on_reactor_read(swoole::Reactor *reactor, ::swoole::network::Socket *socket);
+    static int on_reactor_read(swoole::Reactor *reactor, ::swoole::Event *event);
 
     // Close listener
     bool close();

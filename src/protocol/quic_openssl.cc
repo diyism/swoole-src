@@ -586,10 +586,12 @@ bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
 
     swoole_socket->fd = udp_fd;
     swoole_socket->socket_type = SW_SOCK_UDP;
-    swoole_socket->fdtype = SW_FD_UDP;
+    swoole_socket->fd_type = SW_FD_DGRAM_SERVER;
     swoole_socket->object = this;  // Bind Listener to socket
-    swoole_socket->read_handler = on_reactor_read;
     swoole_socket->set_nonblock();
+
+    // Set handler for QUIC UDP socket
+    _reactor->set_handler(SW_FD_DGRAM_SERVER, SW_EVENT_READ, on_reactor_read);
 
     // Register to Reactor for read events
     if (_reactor->add(swoole_socket, SW_EVENT_READ) < 0) {
@@ -637,8 +639,8 @@ int Listener::create_virtual_fd_pair(int fds[2]) {
     }
 
     // Set both ends to non-blocking mode
-    swoole_set_nonblock(fds[0]);
-    swoole_set_nonblock(fds[1]);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
 
     swoole_trace_log(SW_TRACE_QUIC, "Created virtual fd pair: [%d, %d]", fds[0], fds[1]);
     return SW_OK;
@@ -675,11 +677,11 @@ swoole::Connection* Listener::create_swoole_connection(Connection *qc) {
     int virtual_fd = fds[0];
 
     // Create Socket object for Swoole
-    swoole::network::Socket *sock = new swoole::network::Socket(virtual_fd, SW_FD_SESSION, SW_SOCK_STREAM);
+    swoole::network::Socket *sock = swoole::make_socket(virtual_fd, SW_FD_SESSION);
     if (!sock) {
         swoole_sys_warning("Failed to create Socket object");
-        close(fds[0]);
-        close(fds[1]);
+        ::close(fds[0]);
+        ::close(fds[1]);
         return nullptr;
     }
 
@@ -859,7 +861,8 @@ void Listener::process_connections() {
     }
 }
 
-int Listener::on_reactor_read(swoole::Reactor *reactor, swoole::network::Socket *socket) {
+int Listener::on_reactor_read(swoole::Reactor *reactor, swoole::Event *event) {
+    swoole::network::Socket *socket = event->socket;
     Listener *listener = (Listener *) socket->object;
     if (!listener) {
         swoole_warning("Listener object is null in reactor callback");
