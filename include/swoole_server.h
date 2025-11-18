@@ -31,6 +31,10 @@
 #include "swoole_dtls.h"
 #endif
 
+#ifdef SW_USE_QUIC
+#include "swoole_quic.h"
+#endif
+
 #ifdef __MACH__
 #include <sys/syslimits.h>
 #endif

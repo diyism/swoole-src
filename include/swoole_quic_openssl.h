@@ -76,6 +76,17 @@ enum swQuicStreamState {
     SW_QUIC_STREAM_CLOSED = 4,
 };
 
+// Forward declarations for Swoole types
+namespace swoole {
+class Server;
+class Reactor;
+class Connection;
+using SessionId = int64_t;
+namespace network {
+class Socket;
+}
+}
+
 namespace swoole {
 namespace quic {
 
@@ -121,14 +132,6 @@ struct Stream {
     bool close(uint64_t error_code = SW_QUIC_NO_ERROR);
 };
 
-// Forward declaration for Swoole types
-namespace swoole {
-class Reactor;
-namespace network {
-class Socket;
-}
-}
-
 // QUIC Listener (Server-side only)
 struct Listener {
     SSL_CTX *ssl_ctx;
@@ -156,12 +159,12 @@ struct Listener {
     void *user_data;
 
     // ===== Swoole Reactor Integration =====
-    swoole::Reactor *reactor;              // Swoole Reactor instance
-    swoole::network::Socket *swoole_socket; // Swoole Socket wrapper
+    ::swoole::Reactor *reactor;              // Swoole Reactor instance
+    ::swoole::network::Socket *swoole_socket; // Swoole Socket wrapper
     bool reactor_registered;               // Whether registered to reactor
 
     // Swoole Server integration (for creating connections)
-    class swoole::Server *swoole_server;   // Associated Swoole Server instance
+    ::swoole::Server *swoole_server;   // Associated Swoole Server instance
 
     // Virtual FD management (Phase 5)
     std::unordered_map<int, Connection*> virtual_fd_map;  // Map virtual fd to QUIC connection
@@ -193,11 +196,11 @@ struct Listener {
     bool unregister_from_reactor();
 
     // Set Swoole Server instance (must be called before processing connections)
-    void set_server(class swoole::Server *server);
+    void set_server(class ::swoole::Server *server);
 
     // ===== Phase 5: Virtual FD Methods =====
     // Create Swoole Connection for QUIC connection
-    swoole::Connection* create_swoole_connection(Connection *qc);
+    ::swoole::Connection* create_swoole_connection(Connection *qc);
 
     // Notify Swoole of connection events
     bool notify_connect(Connection *qc);
@@ -214,7 +217,7 @@ struct Listener {
     void process_connections();
 
     // Static callback for Reactor events
-    static int on_reactor_read(swoole::Reactor *reactor, swoole::network::Socket *socket);
+    static int on_reactor_read(swoole::Reactor *reactor, ::swoole::network::Socket *socket);
 
     // Close listener
     bool close();
@@ -259,10 +262,10 @@ struct Connection {
     void *user_data;
 
     // ===== Swoole Connection Integration =====
-    swoole::Connection *swoole_conn;    // Associated Swoole connection
-    swoole::SessionId session_id;        // Swoole session ID
+    ::swoole::Connection *swoole_conn;    // Associated Swoole connection
+    ::swoole::SessionId session_id;        // Swoole session ID
     int server_fd;                       // Server socket fd (for Swoole)
-    swoole::Reactor *reactor;            // Reactor instance
+    ::swoole::Reactor *reactor;            // Reactor instance
 
     // Virtual FD for Swoole integration (Phase 5)
     int virtual_fd_pair[2];              // [0] = virtual fd for Swoole, [1] = internal fd
@@ -278,7 +281,7 @@ struct Connection {
 
     // ===== Swoole Integration Methods =====
     // Bind to Swoole connection (called after accepting QUIC connection)
-    bool bind_swoole_connection(swoole::Connection *conn, swoole::SessionId sid, int fd, swoole::Reactor *r);
+    bool bind_swoole_connection(swoole::Connection *conn, ::swoole::SessionId sid, int fd, ::swoole::Reactor *r);
 
     // Virtual FD management (Phase 5)
     int get_virtual_fd() const { return has_virtual_fd ? virtual_fd_pair[0] : -1; }
@@ -306,7 +309,7 @@ struct Connection {
 };
 
 // Backward compatibility: Server is an alias for Listener
-// This allows HTTP/3 layer code to use swoole::quic::Server
+// This allows HTTP/3 layer code to use ::swoole::quic::Server
 typedef Listener Server;
 
 // Helper functions

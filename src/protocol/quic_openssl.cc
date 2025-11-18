@@ -13,6 +13,8 @@
 
 #include "swoole_quic_openssl.h"
 #include "swoole_string.h"
+#include "swoole_server.h"
+#include "swoole_socket.h"
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/select.h>

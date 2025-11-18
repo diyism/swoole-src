@@ -16,12 +16,14 @@
 
 #include "swoole_http3.h"
 #include "swoole_string.h"
+#include "swoole_server.h"
 
 #ifdef SW_USE_HTTP3
 
 #include <string.h>
 
-using namespace swoole;
+// Note: Removed "using namespace swoole" to avoid ambiguity with Connection class
+// (swoole::Connection vs swoole::http3::Connection vs swoole::quic::Connection)
 using namespace swoole::http3;
 
 // ==================== Helper Functions ====================
@@ -125,7 +127,7 @@ static std::string json_escape(const std::string &input) {
 }
 
 // Serialize HTTP/3 Stream request to JSON format
-static String* serialize_http3_request_to_json(Stream *s) {
+static swoole::String* serialize_http3_request_to_json(Stream *s) {
     std::string json = "{";
 
     // Add method
@@ -172,7 +174,7 @@ static String* serialize_http3_request_to_json(Stream *s) {
     json += "}";
 
     // Create Swoole String
-    String *result = new String(json.length());
+    swoole::String *result = new swoole::String(json.length());
     result->append(json.c_str(), json.length());
 
     swoole_trace_log(SW_TRACE_HTTP3, "Serialized HTTP/3 request to JSON: %zu bytes", result->length);
@@ -1034,7 +1036,7 @@ bool swoole::http3::Server::bind(const char *host, int port, SSL_CTX *ssl_ctx) {
     return true;
 }
 
-void swoole::http3::Server::set_server(swoole::Server *server) {
+void swoole::http3::Server::set_server(::swoole::Server *server) {
     swoole_server = server;
     // Also set it on the underlying QUIC listener
     if (quic_server) {
@@ -1079,7 +1081,7 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
         // ===== Phase 6.1: Request Event Marking =====
         // Track HTTP/3 requests and verify Swoole integration
         if (c->quic_conn && c->quic_conn->swoole_conn && server->swoole_server) {
-            swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
+            ::swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
             int virtual_fd = c->quic_conn->get_virtual_fd();
 
             swoole_trace_log(SW_TRACE_HTTP3,
@@ -1100,13 +1102,13 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
 
             // ===== Phase 6.2: Request Data Passing to Worker =====
             // Serialize HTTP/3 request to JSON format
-            String *request_json = serialize_http3_request_to_json(s);
+            swoole::String *request_json = serialize_http3_request_to_json(s);
             if (request_json) {
                 // Create SendData packet for Worker dispatch
-                SendData send_data = {};
+                swoole::SendData send_data = {};
                 send_data.info.fd = swoole_conn->session_id;  // session_id as fd
                 send_data.info.len = request_json->length;
-                send_data.info.type = SW_SERVER_EVENT_RECV_DATA;
+                send_data.info.type = swoole::SW_SERVER_EVENT_RECV_DATA;
                 send_data.data = request_json->str;
 
                 // Get reactor_id from current thread
@@ -1141,7 +1143,7 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
                 }
 
                 // Clean up JSON buffer
-                delete request_json;
+                delete (swoole::String*)request_json;
             } else {
                 swoole_warning("Failed to serialize HTTP/3 request: stream_id=%ld", s->stream_id);
             }
@@ -1158,7 +1160,7 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
 
         // Phase 6.4: Clean up stream from active_streams mapping
         if (server && c->quic_conn && c->quic_conn->swoole_conn) {
-            swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
+            ::swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
             std::string stream_key = std::to_string(swoole_conn->session_id) + ":" +
                                       std::to_string(s->stream_id);
             auto it = server->active_streams.find(stream_key);
