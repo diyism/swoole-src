@@ -988,6 +988,36 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
     conn->on_recv_header = [](Connection *c, Stream *s) {
         // Headers are complete - now call the request handler
         Server *server = (Server *) c->user_data;
+
+        // ===== Phase 6.1: Request Event Marking =====
+        // Track HTTP/3 requests and verify Swoole integration
+        if (c->quic_conn && c->quic_conn->swoole_conn && server->swoole_server) {
+            swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
+            int virtual_fd = c->quic_conn->get_virtual_fd();
+
+            swoole_trace_log(SW_TRACE_HTTP3,
+                "HTTP/3 request received: method=%s, path=%s, scheme=%s, "
+                "session_id=%ld, virtual_fd=%d, stream_id=%ld",
+                s->method.c_str(), s->path.c_str(), s->scheme.c_str(),
+                swoole_conn->session_id, virtual_fd, s->stream_id);
+
+            // Verify session_id mapping
+            if (swoole_conn->session_id > 0) {
+                swoole_trace_log(SW_TRACE_HTTP3,
+                    "Session mapping verified: session_id=%ld maps to virtual_fd=%d",
+                    swoole_conn->session_id, virtual_fd);
+            } else {
+                swoole_warning("Invalid session_id for HTTP/3 request: session_id=%ld",
+                    swoole_conn->session_id);
+            }
+
+            // TODO Phase 6.2: Serialize request and dispatch to Worker
+            // - Serialize HTTP/3 request to JSON format
+            // - Create RecvData packet
+            // - Call server->swoole_server->factory->dispatch()
+        }
+
+        // Keep existing on_request callback for non-Swoole integration mode
         if (server && server->on_request) {
             server->on_request(c, s);
         }
