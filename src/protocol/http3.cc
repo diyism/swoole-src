@@ -978,15 +978,43 @@ swoole::http3::Server::~Server() {
     stop();
 }
 
-bool swoole::http3::Server::bind(const char *host, int port, SSL_CTX *ssl_ctx) {
+bool swoole::http3::Server::bind(const char *host, int port, const char *cert_file, const char *key_file) {
     quic_server = new swoole::quic::Server();
     if (!quic_server) {
         return false;
     }
 
-    quic_server->ssl_ctx = ssl_ctx;
+    // Phase 7.7: Create QUIC-specific SSL context with OSSL_QUIC_server_method()
+    // Cannot reuse TLS SSL_CTX - QUIC requires OSSL_QUIC_server_method()
+    SSL_CTX *ctx = SSL_CTX_new(OSSL_QUIC_server_method());
+    if (!ctx) {
+        swoole_warning("Failed to create QUIC SSL context");
+        delete quic_server;
+        quic_server = nullptr;
+        return false;
+    }
+
+    // Load certificate and key
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert_file) <= 0) {
+        swoole_warning("Failed to load certificate: %s", cert_file);
+        SSL_CTX_free(ctx);
+        delete quic_server;
+        quic_server = nullptr;
+        return false;
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0) {
+        swoole_warning("Failed to load private key: %s", key_file);
+        SSL_CTX_free(ctx);
+        delete quic_server;
+        quic_server = nullptr;
+        return false;
+    }
+
+    quic_server->ssl_ctx = ctx;
 
     if (!quic_server->bind(host, port)) {
+        SSL_CTX_free(quic_server->ssl_ctx);
         delete quic_server;
         quic_server = nullptr;
         return false;

@@ -224,7 +224,7 @@ struct Server {
     Server();
     ~Server();
 
-    bool bind(const char *host, int port, SSL_CTX *ssl_ctx);
+    bool bind(const char *host, int port, const char *cert_file, const char *key_file);
     bool start();
     void stop();
 

@@ -543,37 +543,8 @@ static PHP_METHOD(swoole_http3_server, start) {
         RETURN_FALSE;
     }
 
-    // Create SSL context using OpenSSL 3.5 native QUIC server method
-    SSL_CTX *ssl_ctx = SSL_CTX_new(OSSL_QUIC_server_method());
-    if (!ssl_ctx) {
-        php_swoole_fatal_error(E_ERROR, "failed to create QUIC SSL context");
-        RETURN_FALSE;
-    }
-
-    // Set ALPN callback for HTTP/3 protocol negotiation
-    SSL_CTX_set_alpn_select_cb(ssl_ctx, http3_alpn_select_callback, nullptr);
-
-    // Load certificate and key
-    // Use SSL_CTX_use_certificate_chain_file to load the full certificate chain
-    // This is critical for QUIC/TLS 1.3 where the entire chain must be sent
-    if (SSL_CTX_use_certificate_chain_file(ssl_ctx, Z_STRVAL_P(zcert)) != 1) {
-        unsigned long err = ERR_get_error();
-        char err_buf[256];
-        ERR_error_string_n(err, err_buf, sizeof(err_buf));
-        SSL_CTX_free(ssl_ctx);
-        php_swoole_fatal_error(E_ERROR, "failed to load SSL certificate chain: %s", err_buf);
-        RETURN_FALSE;
-    }
-
-    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, Z_STRVAL_P(zkey), SSL_FILETYPE_PEM) != 1) {
-        SSL_CTX_free(ssl_ctx);
-        php_swoole_fatal_error(E_ERROR, "failed to load SSL private key");
-        RETURN_FALSE;
-    }
-
-    // Bind server
-    if (!hso->server->bind(Z_STRVAL_P(zhost), Z_LVAL_P(zport), ssl_ctx)) {
-        SSL_CTX_free(ssl_ctx);
+    // Phase 7.7: Bind server (creates QUIC SSL context internally with OSSL_QUIC_server_method)
+    if (!hso->server->bind(Z_STRVAL_P(zhost), Z_LVAL_P(zport), Z_STRVAL_P(zcert), Z_STRVAL_P(zkey))) {
         php_swoole_fatal_error(E_ERROR, "failed to bind HTTP/3 server");
         RETURN_FALSE;
     }

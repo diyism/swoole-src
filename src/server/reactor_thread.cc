@@ -805,23 +805,27 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
                 continue;
             }
 
-            // Phase 7.5: Check SSL context (delayed initialization support)
-            // SSL context may not be ready yet at this point in the lifecycle.
-            // We'll attempt to bind, but if SSL context is not ready, we log a warning
-            // and skip HTTP/3 initialization. The server will still start normally.
-            // TODO Phase 7.6: Implement delayed binding after SSL initialization
+            // Phase 7.7: Check SSL configuration and get cert/key paths
             if (!ls->ssl_context || !ls->ssl_context->ready()) {
                 swoole_warning("SSL context not ready for HTTP/3 on port %d. "
                               "HTTP/3 will be disabled. Make sure ssl_cert_file and ssl_key_file are configured.", ls->port);
                 break;  // Skip HTTP/3, but don't fail server start
             }
-            SSL_CTX *ssl_ctx = ls->ssl_context->get_context();
+
+            // Get SSL cert/key paths (QUIC needs to create its own SSL_CTX with OSSL_QUIC_server_method)
+            const char *cert_file = ls->get_ssl_cert_file().c_str();
+            const char *key_file = ls->get_ssl_key_file().c_str();
+
+            if (!cert_file || !*cert_file || !key_file || !*key_file) {
+                swoole_warning("SSL cert/key not configured for HTTP/3 on port %d. HTTP/3 will be disabled.", ls->port);
+                break;
+            }
 
             // Get host name from ListenPort
             const char *host_str = ls->host.empty() ? "0.0.0.0" : ls->host.c_str();
 
-            // Bind QUIC listener
-            if (!h3_server->bind(host_str, ls->port, ssl_ctx)) {
+            // Bind QUIC listener (creates QUIC-specific SSL context internally)
+            if (!h3_server->bind(host_str, ls->port, cert_file, key_file)) {
                 swoole_warning("Failed to bind HTTP/3 server to %s:%d. HTTP/3 will be disabled.", host_str, ls->port);
                 break;  // Skip HTTP/3, but don't fail server start
             }
