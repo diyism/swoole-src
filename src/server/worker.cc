@@ -23,6 +23,9 @@
 
 #include "swoole_api.h"
 
+// Phase 6.3: Include HTTP server for HTTP/3 request handling
+#include "php_swoole_http_server.h"
+
 namespace swoole {
 using namespace network;
 
@@ -106,23 +109,20 @@ static sw_inline void Worker_do_task(Server *serv, Worker *worker, const DataHea
     recv_data.info.len = packet.length;
     recv_data.data = packet.data;
 
-    // ===== Phase 6.2: HTTP/3 Request Recognition =====
+    // ===== Phase 6.2/6.3: HTTP/3 Request Recognition and Processing =====
     // Check if this is HTTP/3 request data (JSON format)
     if (packet.length > 0 && packet.data[0] == '{') {
         // Likely HTTP/3 request in JSON format
         swoole_trace_log(SW_TRACE_HTTP3,
-            "[Worker] HTTP/3 request received: session_id=%ld, len=%zu",
+            "[Worker] HTTP/3 request detected: session_id=%ld, len=%zu",
             info->fd, packet.length);
 
-        // Log the first 200 bytes for debugging (or full data if shorter)
-        size_t log_len = packet.length < 200 ? packet.length : 200;
-        std::string data_preview(packet.data, log_len);
-        swoole_trace_log(SW_TRACE_HTTP3,
-            "[Worker] HTTP/3 request data: %s%s",
-            data_preview.c_str(),
-            packet.length > 200 ? "..." : "");
-
-        // TODO Phase 6.3: Parse JSON and create PHP Request/Response objects
+        // Phase 6.3: Call HTTP/3 PHP handler
+        if (php_swoole_http3_server_onReceive(serv, &recv_data) == SW_OK) {
+            worker->add_request_count();
+            sw_atomic_fetch_add(&serv->gs->request_count, 1);
+        }
+        return;
     }
 
     if (callback(serv, &recv_data) == SW_OK) {

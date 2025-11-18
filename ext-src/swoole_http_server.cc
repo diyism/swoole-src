@@ -181,6 +181,152 @@ _dtor_and_return:
     return SW_OK;
 }
 
+// ===== Phase 6.3: HTTP/3 Request Processing =====
+int php_swoole_http3_server_onReceive(Server *serv, RecvData *req) {
+    auto session_id = req->info.fd;
+    auto server_fd = req->info.server_fd;
+
+    Connection *conn = serv->get_connection_verify_no_ssl(session_id);
+    if (!conn) {
+        swoole_error_log(SW_LOG_TRACE, SW_ERROR_SESSION_NOT_EXIST, "session[%ld] is closed", session_id);
+        return SW_ERR;
+    }
+
+    auto *port = serv->get_port_by_server_fd(server_fd);
+    if (!port || !php_swoole_server_isset_callback(serv, port, SW_SERVER_CB_onRequest)) {
+        swoole_warning("HTTP/3: onRequest callback not set");
+        return SW_ERR;
+    }
+
+    // Parse JSON request data using PHP's json_decode
+    zval args[2];
+    ZVAL_STRINGL(&args[0], req->data, req->info.len);
+    ZVAL_BOOL(&args[1], true);  // associative array
+
+    zend::Variable result = zend::function::call("json_decode", 2, args);
+    zval_ptr_dtor(&args[0]);
+
+    zval *result_ptr = result.ptr();
+    if (Z_TYPE_P(result_ptr) == IS_NULL) {
+        swoole_warning("HTTP/3: Failed to decode JSON request data");
+        return SW_ERR;
+    }
+
+    if (Z_TYPE_P(result_ptr) != IS_ARRAY) {
+        swoole_warning("HTTP/3: Invalid JSON request format, expected array but got type %d", Z_TYPE_P(result_ptr));
+        return SW_ERR;
+    }
+
+    zval zrequest_data = *result_ptr;
+
+    // Extract request fields
+    HashTable *ht = Z_ARRVAL(zrequest_data);
+    zval *zmethod = zend_hash_str_find(ht, ZEND_STRL("method"));
+    zval *zpath = zend_hash_str_find(ht, ZEND_STRL("path"));
+    zval *zscheme = zend_hash_str_find(ht, ZEND_STRL("scheme"));
+    zval *zauthority = zend_hash_str_find(ht, ZEND_STRL("authority"));
+    zval *zheaders = zend_hash_str_find(ht, ZEND_STRL("headers"));
+    zval *zbody = zend_hash_str_find(ht, ZEND_STRL("body"));
+    zval *zstream_id = zend_hash_str_find(ht, ZEND_STRL("stream_id"));
+
+    swoole_trace_log(SW_TRACE_HTTP3,
+        "[Worker][HTTP/3] Processing request: method=%s, path=%s, session_id=%ld",
+        zmethod ? Z_STRVAL_P(zmethod) : "?",
+        zpath ? Z_STRVAL_P(zpath) : "?",
+        session_id);
+
+    // Create HttpContext
+    HttpContext *ctx = swoole_http_context_new(session_id);
+    ctx->init(serv);
+    ctx->fd = session_id;
+    ctx->keepalive = false;  // HTTP/3 has its own connection management
+    ctx->http2 = false;
+
+    // Store stream_id in context for response handling
+    if (zstream_id && Z_TYPE_P(zstream_id) == IS_LONG) {
+        ctx->stream_id = Z_LVAL_P(zstream_id);
+    }
+
+    zval *zrequest_object = ctx->request.zobject;
+    zval *zresponse_object = ctx->response.zobject;
+
+    // Fill $request->server array
+    zval *zserver = ctx->request.zserver;
+    array_init(zserver);
+
+    if (zmethod) {
+        add_assoc_string(zserver, "request_method", Z_STRVAL_P(zmethod));
+    }
+    if (zpath) {
+        add_assoc_string(zserver, "request_uri", Z_STRVAL_P(zpath));
+        add_assoc_string(zserver, "path_info", Z_STRVAL_P(zpath));
+    }
+    if (zscheme) {
+        add_assoc_string(zserver, "request_scheme", Z_STRVAL_P(zscheme));
+    }
+    if (zauthority) {
+        add_assoc_string(zserver, "http_host", Z_STRVAL_P(zauthority));
+    }
+    add_assoc_string(zserver, "server_protocol", (char *) "HTTP/3");
+    add_assoc_long(zserver, "request_time", time(nullptr));
+    add_assoc_double(zserver, "request_time_float", microtime());
+
+    Connection *serv_sock = serv->get_connection(server_fd);
+    if (serv_sock) {
+        add_assoc_long(zserver, "server_port", serv_sock->info.get_port());
+    }
+    add_assoc_long(zserver, "remote_port", conn->info.get_port());
+    add_assoc_string(zserver, "remote_addr", (char *) conn->info.get_addr());
+
+    // Fill $request->header array
+    if (zheaders && Z_TYPE_P(zheaders) == IS_ARRAY) {
+        zval *zheader = ctx->request.zheader;
+        array_init(zheader);
+
+        HashTable *headers_ht = Z_ARRVAL_P(zheaders);
+        zend_string *key;
+        zval *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(headers_ht, key, val) {
+            if (key && Z_TYPE_P(val) == IS_STRING) {
+                add_assoc_string(zheader, ZSTR_VAL(key), Z_STRVAL_P(val));
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    // Fill $request->rawContent (body)
+    if (zbody && Z_TYPE_P(zbody) == IS_STRING && Z_STRLEN_P(zbody) > 0) {
+        zend_update_property_stringl(swoole_http_request_ce, SW_Z8_OBJ_P(zrequest_object),
+            ZEND_STRL("rawContent"), Z_STRVAL_P(zbody), Z_STRLEN_P(zbody));
+    }
+
+    // Set fd property
+    zend_update_property_long(swoole_http_request_ce, SW_Z8_OBJ_P(zrequest_object), ZEND_STRL("fd"), session_id);
+    zend_update_property_long(swoole_http_response_ce, SW_Z8_OBJ_P(zresponse_object), ZEND_STRL("fd"), session_id);
+
+    // Store stream_id in response object for Phase 6.4
+    if (zstream_id) {
+        zend_update_property(swoole_http_response_ce, SW_Z8_OBJ_P(zresponse_object), ZEND_STRL("streamId"), zstream_id);
+    }
+
+    swoole_trace_log(SW_TRACE_HTTP3,
+        "[Worker][HTTP/3] Calling onRequest callback: session_id=%ld, stream_id=%d",
+        session_id, ctx->stream_id);
+
+    // Get onRequest callback
+    zend::Callable *cb = php_swoole_server_get_callback(serv, server_fd, SW_SERVER_CB_onRequest);
+    if (cb) {
+        http_server_process_request(serv, cb, ctx);
+    } else {
+        swoole_warning("HTTP/3: onRequest callback not found");
+    }
+
+    // Clean up (request/response objects managed by HttpContext)
+    zval_ptr_dtor(zrequest_object);
+    zval_ptr_dtor(zresponse_object);
+
+    return SW_OK;
+}
+
 void php_swoole_http_server_onClose(Server *serv, DataHead *info) {
     client_ips.erase(info->fd);
     php_swoole_server_onClose(serv, info);

@@ -39,6 +39,9 @@ int swoole_http2_server_onReceive(swoole::Server *serv, swoole::Connection *conn
 std::shared_ptr<swoole::http2::Session> swoole_http2_server_session_new(swoole::SessionId fd);
 void swoole_http2_server_session_free(swoole::SessionId fd);
 
+// Phase 6.3: HTTP/3 request processing
+int php_swoole_http3_server_onReceive(swoole::Server *serv, swoole::RecvData *req);
+
 bool swoole_http2_server_end(swoole::http::Context *ctx, zval *zdata);
 bool swoole_http2_server_write(swoole::http::Context *ctx, zval *zdata);
 bool swoole_http2_server_send_file(
