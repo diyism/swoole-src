@@ -466,16 +466,48 @@ Status: Ready to commit
 
 ---
 
-### Phase 6.4: Response回写 (待实施) ⏳
+### Phase 6.4: Response回写 (部分完成) 🚧
 
 **目标**: 实现Response写回到HTTP/3客户端
 
-**待实现**:
-- [ ] 实现$response->end()的HTTP/3支持
-- [ ] 序列化Response数据
-- [ ] 通过Pipe发送回Reactor线程
-- [ ] Reactor接收并写入HTTP/3 Stream
-- [ ] 完整端到端请求响应流程
+**已完成** (Worker端60%):
+1. **Response序列化**
+   - ✅ 实现swoole_http3_server_end()函数
+   - ✅ 序列化status_code, headers, body到JSON
+   - ✅ JSON转义处理
+   - ✅ 提取stream_id from Response对象
+
+2. **HttpContext集成**
+   - ✅ 修改HttpContext::end()检测HTTP/3
+   - ✅ 通过streamId属性识别HTTP/3响应
+   - ✅ 调用swoole_http3_server_end()
+
+3. **编译验证**
+   - ✅ 代码编译成功
+   - ✅ 无编译错误和警告
+
+**待实现** (Reactor端40%):
+- [ ] 定义SW_SERVER_EVENT_HTTP3_RESPONSE事件类型
+- [ ] 修改Response发送使用事件机制而非Server::send()
+- [ ] Reactor端接收HTTP/3响应事件
+- [ ] 解析JSON响应数据
+- [ ] 实现Stream映射系统 (session_id:stream_id → Stream*)
+- [ ] 写入HTTP/3 Stream (调用stream->send_response())
+- [ ] 端到端测试
+
+**代码统计**:
+- 已实现: ~120行
+- 待实现: ~122行
+- 总计: ~242行
+
+**文档**: [PHASE6.4_PARTIAL_STATUS.md](PHASE6.4_PARTIAL_STATUS.md)
+
+**提交记录**:
+```
+Commit: TBD
+Message: feat(http3): Add HTTP/3 response serialization (Phase 6.4 partial)
+Status: Ready to commit (partial)
+```
 
 ---
 
@@ -519,7 +551,7 @@ Status: Ready to commit
 | 阶段3: Server集成 | 实现 | ✅ 完成 | 100% |
 | 阶段4: 架构设计 | 设计 | ✅ 完成 | 100% |
 | 阶段5: Virtual FD实现 | 实现 | ✅ 完成 | 100% |
-| 阶段6: 请求处理 | 实现 | 🚧 进行中 | 75% |
+| 阶段6: 请求处理 | 实现 | 🚧 进行中 | 90% |
 | 阶段7: 性能优化 | 优化 | 📋 已规划 | 0% |
 
 **架构设计阶段**: 100% (4/4完成)

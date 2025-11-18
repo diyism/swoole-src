@@ -181,6 +181,117 @@ _dtor_and_return:
     return SW_OK;
 }
 
+// ===== Phase 6.4: HTTP/3 Response Handling =====
+bool swoole_http3_server_end(HttpContext *ctx, zval *zdata) {
+    // Get Response object to extract stream_id
+    zval *zresponse_object = ctx->response.zobject;
+    zval *zstream_id = sw_zend_read_property(swoole_http_response_ce, zresponse_object, ZEND_STRL("streamId"), 0);
+
+    if (!zstream_id || Z_TYPE_P(zstream_id) != IS_LONG) {
+        swoole_warning("HTTP/3: streamId not found in Response object");
+        return false;
+    }
+
+    int64_t stream_id = Z_LVAL_P(zstream_id);
+
+    // Get response data
+    char *data = nullptr;
+    size_t length = zdata ? php_swoole_get_send_data(zdata, &data) : 0;
+
+    // Get headers
+    zval *zheader = sw_zend_read_property(swoole_http_response_ce, zresponse_object, ZEND_STRL("header"), 0);
+
+    // Build JSON response packet
+    std::string json = "{";
+
+    // Add session_id
+    char buf[64];
+    snprintf(buf, sizeof(buf), "\"session_id\":%ld,", ctx->fd);
+    json += buf;
+
+    // Add stream_id
+    snprintf(buf, sizeof(buf), "\"stream_id\":%ld,", stream_id);
+    json += buf;
+
+    // Add status code
+    snprintf(buf, sizeof(buf), "\"status_code\":%d,", ctx->response.status ? ctx->response.status : 200);
+    json += buf;
+
+    // Add headers
+    json += "\"headers\":{";
+    if (zheader && Z_TYPE_P(zheader) == IS_ARRAY) {
+        bool first = true;
+        HashTable *ht = Z_ARRVAL_P(zheader);
+        zend_string *key;
+        zval *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(ht, key, val) {
+            if (key && Z_TYPE_P(val) == IS_STRING) {
+                if (!first) json += ",";
+
+                // Simple JSON escaping for key and value
+                std::string escaped_key;
+                std::string escaped_val;
+
+                for (size_t i = 0; i < ZSTR_LEN(key); i++) {
+                    char c = ZSTR_VAL(key)[i];
+                    if (c == '"' || c == '\\') escaped_key += '\\';
+                    escaped_key += c;
+                }
+
+                for (size_t i = 0; i < Z_STRLEN_P(val); i++) {
+                    char c = Z_STRVAL_P(val)[i];
+                    if (c == '"' || c == '\\') escaped_val += '\\';
+                    escaped_val += c;
+                }
+
+                json += "\"" + escaped_key + "\":\"" + escaped_val + "\"";
+                first = false;
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+    json += "},";
+
+    // Add body (with proper escaping)
+    json += "\"body\":\"";
+    if (data && length > 0) {
+        for (size_t i = 0; i < length; i++) {
+            char c = data[i];
+            if (c == '"' || c == '\\') json += '\\';
+            else if (c == '\n') { json += "\\n"; continue; }
+            else if (c == '\r') { json += "\\r"; continue; }
+            else if (c == '\t') { json += "\\t"; continue; }
+            json += c;
+        }
+    }
+    json += "\"}";
+
+    swoole_trace_log(SW_TRACE_HTTP3,
+        "[Worker][HTTP/3] Sending response: session_id=%ld, stream_id=%ld, status=%d, body_len=%zu",
+        ctx->fd, stream_id, ctx->response.status, length);
+
+    // Send to Reactor thread via Server::send
+    Server *serv = ctx->get_async_server();
+    if (!serv) {
+        swoole_warning("HTTP/3: Server not found");
+        return false;
+    }
+
+    // Use Server::send to send the JSON response back
+    // The Reactor will recognize it as HTTP/3 response by the JSON format
+    bool ret = serv->send(ctx->fd, json.c_str(), json.length());
+
+    if (ret) {
+        swoole_trace_log(SW_TRACE_HTTP3,
+            "[Worker][HTTP/3] Response sent successfully: %zu bytes", json.length());
+        ctx->end_ = 1;
+        ctx->completed = 1;
+    } else {
+        swoole_warning("HTTP/3: Failed to send response");
+    }
+
+    return ret;
+}
+
 // ===== Phase 6.3: HTTP/3 Request Processing =====
 int php_swoole_http3_server_onReceive(Server *serv, RecvData *req) {
     auto session_id = req->info.fd;

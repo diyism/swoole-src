@@ -778,6 +778,15 @@ void HttpContext::write(zval *zdata, zval *return_value) {
 }
 
 void HttpContext::end(zval *zdata, zval *return_value) {
+    // Phase 6.4: Check for HTTP/3 by looking for streamId property
+    if (!http2) {
+        zval *zstream_id = sw_zend_read_property(swoole_http_response_ce, response.zobject, ZEND_STRL("streamId"), 1);
+        if (zstream_id && Z_TYPE_P(zstream_id) == IS_LONG) {
+            // This is an HTTP/3 response
+            RETURN_BOOL(swoole_http3_server_end(this, zdata));
+        }
+    }
+
     if (http2) {
         RETURN_BOOL(swoole_http2_server_end(this, zdata));
     }
