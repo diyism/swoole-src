@@ -266,30 +266,57 @@ bool swoole_http3_server_end(HttpContext *ctx, zval *zdata) {
     json += "\"}";
 
     swoole_trace_log(SW_TRACE_HTTP3,
-        "[Worker][HTTP/3] Sending response: session_id=%ld, stream_id=%ld, status=%d, body_len=%zu",
-        ctx->fd, stream_id, ctx->response.status, length);
+        "[Worker][HTTP/3] Sending response: session_id=%ld, stream_id=%ld, status=%d, body_len=%zu, json_len=%zu",
+        ctx->fd, stream_id, ctx->response.status, length, json.length());
 
-    // Send to Reactor thread via Server::send
+    // Get Server object
     Server *serv = ctx->get_async_server();
     if (!serv) {
         swoole_warning("HTTP/3: Server not found");
         return false;
     }
 
-    // Use Server::send to send the JSON response back
-    // The Reactor will recognize it as HTTP/3 response by the JSON format
-    bool ret = serv->send(ctx->fd, json.c_str(), json.length());
-
-    if (ret) {
-        swoole_trace_log(SW_TRACE_HTTP3,
-            "[Worker][HTTP/3] Response sent successfully: %zu bytes", json.length());
-        ctx->end_ = 1;
-        ctx->completed = 1;
-    } else {
-        swoole_warning("HTTP/3: Failed to send response");
+    // Get connection to find reactor_id
+    Connection *conn = serv->get_connection_verify_no_ssl(ctx->fd);
+    if (!conn) {
+        swoole_warning("HTTP/3: Connection not found for session_id=%ld", ctx->fd);
+        return false;
     }
 
-    return ret;
+    // Phase 6.4: Send to Reactor thread via EventData with HTTP/3 response event type
+    // Check if response fits in IPC buffer
+    if (json.length() > SW_IPC_BUFFER_SIZE) {
+        swoole_warning("HTTP/3: Response too large for IPC buffer: %zu bytes (max %d)",
+            json.length(), SW_IPC_BUFFER_SIZE);
+        // TODO Phase 7: Implement chunked or shared memory for large responses
+        return false;
+    }
+
+    // Create EventData for HTTP/3 response
+    swoole::EventData event_data;
+    memset(&event_data, 0, sizeof(event_data));
+
+    event_data.info.type = SW_SERVER_EVENT_HTTP3_RESPONSE;
+    event_data.info.fd = ctx->fd;  // session_id
+    event_data.info.len = json.length();
+    event_data.info.reactor_id = conn->reactor_id;
+
+    // Copy JSON data to event buffer
+    memcpy(event_data.data, json.c_str(), json.length());
+
+    // Send to Reactor thread
+    ssize_t ret = serv->send_to_reactor_thread(&event_data, sizeof(event_data.info) + json.length(), ctx->fd);
+
+    if (ret > 0) {
+        swoole_trace_log(SW_TRACE_HTTP3,
+            "[Worker][HTTP/3] Response sent to Reactor: %zu bytes", json.length());
+        ctx->end_ = 1;
+        ctx->completed = 1;
+        return true;
+    } else {
+        swoole_warning("HTTP/3: Failed to send response to Reactor thread");
+        return false;
+    }
 }
 
 // ===== Phase 6.3: HTTP/3 Request Processing =====

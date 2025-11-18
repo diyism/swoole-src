@@ -217,6 +217,10 @@ struct Server {
     // Swoole Server integration
     class swoole::Server *swoole_server;
 
+    // Phase 6.4: Active HTTP/3 streams mapping (for response write-back)
+    // Key: "session_id:stream_id", Value: Stream pointer
+    std::unordered_map<std::string, Stream*> active_streams;
+
     Server();
     ~Server();
 

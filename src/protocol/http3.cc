@@ -1128,6 +1128,13 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
                 if (dispatched) {
                     swoole_trace_log(SW_TRACE_HTTP3,
                         "HTTP/3 request dispatched successfully: stream_id=%ld", s->stream_id);
+
+                    // Phase 6.4: Register stream for response write-back
+                    std::string stream_key = std::to_string(swoole_conn->session_id) + ":" +
+                                              std::to_string(s->stream_id);
+                    server->active_streams[stream_key] = s;
+                    swoole_trace_log(SW_TRACE_HTTP3,
+                        "Registered HTTP/3 stream for response: key=%s", stream_key.c_str());
                 } else {
                     swoole_warning("Failed to dispatch HTTP/3 request: session_id=%ld, stream_id=%ld",
                         swoole_conn->session_id, s->stream_id);
@@ -1148,6 +1155,20 @@ Connection* swoole::http3::Server::accept_connection(swoole::quic::Connection *q
 
     conn->on_stream_close = [](Connection *c, Stream *s) {
         Server *server = (Server *) c->user_data;
+
+        // Phase 6.4: Clean up stream from active_streams mapping
+        if (server && c->quic_conn && c->quic_conn->swoole_conn) {
+            swoole::Connection *swoole_conn = c->quic_conn->swoole_conn;
+            std::string stream_key = std::to_string(swoole_conn->session_id) + ":" +
+                                      std::to_string(s->stream_id);
+            auto it = server->active_streams.find(stream_key);
+            if (it != server->active_streams.end()) {
+                server->active_streams.erase(it);
+                swoole_trace_log(SW_TRACE_HTTP3,
+                    "Unregistered HTTP/3 stream: key=%s", stream_key.c_str());
+            }
+        }
+
         if (server && server->on_stream_close) {
             server->on_stream_close(c, s);
         }

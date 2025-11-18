@@ -16,6 +16,10 @@
 
 #include "swoole_server.h"
 
+#ifdef SW_USE_HTTP3
+#include "swoole_http3.h"
+#endif
+
 namespace swoole {
 using network::Socket;
 
@@ -145,6 +149,11 @@ static int ReactorProcess_onPipeRead(Reactor *reactor, Event *event) {
         int64_t request_id = pipe_buffer->info.fd;
         auto packet = serv->message_bus.get_packet();
         serv->call_command_callback(request_id, std::string(packet.data, packet.length));
+        break;
+    }
+    case SW_SERVER_EVENT_HTTP3_RESPONSE: {
+        // Phase 6.4: Handle HTTP/3 response from Worker
+        serv->reactor_process_http3_response(reinterpret_cast<EventData *>(pipe_buffer));
         break;
     }
     default:
@@ -342,4 +351,136 @@ static void ReactorProcess_onTimeout(Timer *timer, TimerNode *tnode) {
         ReactorProcess_onClose(reactor, &notify_ev);
     });
 }
+
+// ===== Phase 6.4: HTTP/3 Response Handling =====
+void Server::reactor_process_http3_response(EventData *event_data) {
+#ifdef SW_USE_HTTP3
+    // Extract response data
+    SessionId session_id = event_data->info.fd;
+    size_t json_len = event_data->info.len;
+    const char *json_data = event_data->data;
+
+    swoole_trace_log(SW_TRACE_HTTP3,
+        "[Reactor][HTTP/3] Received response from Worker: session_id=%ld, len=%zu",
+        session_id, json_len);
+
+    // Find HTTP/3 server from user_data (set during initialization)
+    if (!http3_server) {
+        swoole_warning("HTTP/3: HTTP/3 server not initialized");
+        return;
+    }
+
+    http3::Server *h3_server = (http3::Server *) http3_server;
+
+    // Parse JSON response (simple manual parsing since we control the format)
+    std::string json_str(json_data, json_len);
+
+    // Extract session_id, stream_id, status_code, headers, body from JSON
+    // Format: {"session_id":X,"stream_id":Y,"status_code":Z,"headers":{...},"body":"..."}
+
+    int64_t resp_session_id = 0;
+    int64_t stream_id = 0;
+    int status_code = 200;
+    std::unordered_map<std::string, std::string> headers;
+    std::string body;
+
+    // Simple JSON parsing (TODO Phase 7: Use proper JSON parser)
+    size_t pos = 0;
+
+    // Extract session_id
+    pos = json_str.find("\"session_id\":", pos);
+    if (pos != std::string::npos) {
+        pos += 13; // length of "session_id":
+        resp_session_id = std::stoll(json_str.substr(pos));
+    }
+
+    // Extract stream_id
+    pos = json_str.find("\"stream_id\":", pos);
+    if (pos != std::string::npos) {
+        pos += 12; // length of "stream_id":
+        stream_id = std::stoll(json_str.substr(pos));
+    }
+
+    // Extract status_code
+    pos = json_str.find("\"status_code\":", pos);
+    if (pos != std::string::npos) {
+        pos += 14; // length of "status_code":
+        status_code = std::stoi(json_str.substr(pos));
+    }
+
+    // Extract body (simple extraction - find "body":" and then find closing ")
+    pos = json_str.find("\"body\":\"");
+    if (pos != std::string::npos) {
+        pos += 8; // length of "body":"
+        size_t end_pos = json_str.rfind("\"}"); // Find last "}
+        if (end_pos != std::string::npos && end_pos > pos) {
+            body = json_str.substr(pos, end_pos - pos);
+
+            // Unescape JSON body (handle \n, \r, \t, \", \\)
+            std::string unescaped;
+            unescaped.reserve(body.length());
+            for (size_t i = 0; i < body.length(); i++) {
+                if (body[i] == '\\' && i + 1 < body.length()) {
+                    char next = body[i + 1];
+                    if (next == 'n') { unescaped += '\n'; i++; }
+                    else if (next == 'r') { unescaped += '\r'; i++; }
+                    else if (next == 't') { unescaped += '\t'; i++; }
+                    else if (next == '"') { unescaped += '"'; i++; }
+                    else if (next == '\\') { unescaped += '\\'; i++; }
+                    else { unescaped += body[i]; }
+                } else {
+                    unescaped += body[i];
+                }
+            }
+            body = unescaped;
+        }
+    }
+
+    swoole_trace_log(SW_TRACE_HTTP3,
+        "[Reactor][HTTP/3] Parsed response: session_id=%ld, stream_id=%ld, status=%d, body_len=%zu",
+        resp_session_id, stream_id, status_code, body.length());
+
+    // Lookup HTTP/3 stream from active_streams
+    std::string stream_key = std::to_string(resp_session_id) + ":" + std::to_string(stream_id);
+    auto it = h3_server->active_streams.find(stream_key);
+
+    if (it == h3_server->active_streams.end()) {
+        swoole_warning("HTTP/3: Stream not found for key=%s", stream_key.c_str());
+        return;
+    }
+
+    http3::Stream *stream = it->second;
+
+    // Build response headers
+    std::vector<http3::HeaderField> response_headers;
+    response_headers.push_back(http3::HeaderField(":status", std::to_string(status_code)));
+
+    // Extract custom headers from JSON (TODO Phase 7: Parse headers properly)
+    // For now, just add a default content-type
+    response_headers.push_back(http3::HeaderField("content-type", "text/html; charset=utf-8"));
+
+    // Send HTTP/3 response
+    bool success = stream->send_response(
+        status_code,
+        response_headers,
+        (const uint8_t*)body.c_str(),
+        body.length()
+    );
+
+    if (success) {
+        swoole_trace_log(SW_TRACE_HTTP3,
+            "[Reactor][HTTP/3] Response sent successfully: stream_id=%ld, body_len=%zu",
+            stream_id, body.length());
+    } else {
+        swoole_warning("HTTP/3: Failed to send response: stream_id=%ld", stream_id);
+    }
+
+    // Remove stream from active_streams (cleanup will happen in on_stream_close)
+    // Don't remove here, let the stream close callback handle it
+
+#else
+    swoole_warning("HTTP/3: Compiled without HTTP/3 support");
+#endif
+}
+
 }  // namespace swoole

@@ -647,6 +647,8 @@ enum ServerEventType {
     SW_SERVER_EVENT_SHUTDOWN,
     SW_SERVER_EVENT_COMMAND_REQUEST,
     SW_SERVER_EVENT_COMMAND_RESPONSE,
+    // HTTP/3
+    SW_SERVER_EVENT_HTTP3_RESPONSE,
 };
 
 class Server {
@@ -1653,6 +1655,7 @@ class Server {
     static void worker_signal_handler(int signo);
     static int reactor_process_main_loop(ProcessPool *pool, Worker *worker);
     static void reactor_thread_main_loop(Server *serv, int reactor_id);
+    void reactor_process_http3_response(EventData *event_data);
     static bool task_pack(EventData *task, const void *data, size_t data_len);
     static void task_dump(EventData *task);
     static bool task_unpack(EventData *task, String *buffer, PacketPtr *packet);
