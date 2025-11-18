@@ -795,7 +795,7 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
     }
 
 #ifdef SW_USE_HTTP3
-    // Phase 7.2: Register HTTP/3 QUIC listener to Reactor
+    // Phase 7.2/7.5: Register HTTP/3 QUIC listener to Reactor
     if (serv->private_data_1 && reactor_id == 0) {  // Only register in first reactor thread
         swoole::http3::Server *h3_server = (swoole::http3::Server *) serv->private_data_1;
 
@@ -805,10 +805,15 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
                 continue;
             }
 
-            // Get SSL context for QUIC
+            // Phase 7.5: Check SSL context (delayed initialization support)
+            // SSL context may not be ready yet at this point in the lifecycle.
+            // We'll attempt to bind, but if SSL context is not ready, we log a warning
+            // and skip HTTP/3 initialization. The server will still start normally.
+            // TODO Phase 7.6: Implement delayed binding after SSL initialization
             if (!ls->ssl_context || !ls->ssl_context->ready()) {
-                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SSL_BAD_CLIENT, "SSL context not ready for HTTP/3 on port %d", ls->port);
-                return SW_ERR;
+                swoole_warning("SSL context not ready for HTTP/3 on port %d. "
+                              "HTTP/3 will be disabled. Make sure ssl_cert_file and ssl_key_file are configured.", ls->port);
+                break;  // Skip HTTP/3, but don't fail server start
             }
             SSL_CTX *ssl_ctx = ls->ssl_context->get_context();
 
@@ -817,14 +822,14 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
 
             // Bind QUIC listener
             if (!h3_server->bind(host_str, ls->port, ssl_ctx)) {
-                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to bind HTTP/3 server to %s:%d", host_str, ls->port);
-                return SW_ERR;
+                swoole_warning("Failed to bind HTTP/3 server to %s:%d. HTTP/3 will be disabled.", host_str, ls->port);
+                break;  // Skip HTTP/3, but don't fail server start
             }
 
             // Register to Reactor
             if (!h3_server->quic_server->register_to_reactor(reactor)) {
-                swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to register HTTP/3 listener to reactor");
-                return SW_ERR;
+                swoole_warning("Failed to register HTTP/3 listener to reactor. HTTP/3 will be disabled.");
+                break;  // Skip HTTP/3, but don't fail server start
             }
 
             swoole_trace_log(SW_TRACE_SERVER, "HTTP/3 listener registered on %s:%d", host_str, ls->port);
