@@ -170,6 +170,12 @@ bool ListenPort::ssl_context_create(SSLContext *context) const {
     if (open_http2_protocol) {
         context->http_v2 = 1;
     }
+    // Phase 7.6: Set HTTP/3 flag for SSL context
+#ifdef SW_USE_HTTP3
+    if (open_http3_protocol) {
+        context->http_v3 = 1;
+    }
+#endif
     if (!context->create()) {
         swoole_warning("failed to create ssl content");
         return false;

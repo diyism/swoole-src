@@ -466,7 +466,21 @@ static PHP_METHOD(swoole_server_port, set) {
     }
 
 #ifdef SW_USE_OPENSSL
-    if (port->ssl) {
+    // Phase 7.6: Process SSL options for SSL ports AND HTTP/3 ports
+    // HTTP/3 requires SSL/TLS even if the port is not marked as SSL port
+    if (port->ssl
+#ifdef SW_USE_HTTP3
+        || port->open_http3_protocol
+#endif
+    ) {
+        // Auto-initialize SSL context if needed for HTTP/3
+        if (!port->ssl_context && port->open_http3_protocol) {
+            if (!port->ssl_context_init()) {
+                php_swoole_fatal_error(E_ERROR, "failed to initialize SSL context for HTTP/3");
+                RETURN_FALSE;
+            }
+        }
+
         if (!php_swoole_server_set_ssl_option(vht, port->get_ssl_context())) {
             RETURN_FALSE;
         }
@@ -545,7 +559,8 @@ static PHP_METHOD(swoole_server_port, set) {
             ZEND_HASH_FOREACH_END();
         }
 
-        if (!port->get_ssl_cert_file().empty() || !port->has_sni_contexts()) {
+        // Phase 7.6: Initialize SSL context if cert file is configured
+        if (!port->get_ssl_cert_file().empty() || port->has_sni_contexts()) {
             if (!port->ssl_init()) {
                 php_swoole_fatal_error(E_ERROR, "ssl_init() failed");
                 RETURN_FALSE;

@@ -103,6 +103,7 @@ namespace swoole {
 struct SSLContext {
     uchar http : 1;
     uchar http_v2 : 1;
+    uchar http_v3 : 1;  // Phase 7.6: HTTP/3 support
     uchar prefer_server_ciphers : 1;
     uchar session_tickets : 1;
     uchar stapling : 1;

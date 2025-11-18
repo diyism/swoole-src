@@ -448,8 +448,30 @@ int Server::start_check() {
             port->websocket_settings.compression = websocket_compression;
         }
 #ifdef SW_USE_HTTP3
-        // Phase 7.2: Initialize HTTP/3 server if enabled
+        // Phase 7.2/7.6: Initialize HTTP/3 server if enabled
         if (port->open_http3_protocol && !private_data_1) {
+            // Phase 7.6: Initialize SSL context if not already done
+            // HTTP/3 requires SSL/TLS, so we need to ensure SSL context is ready
+            if (!port->ssl_context || !port->ssl_context->ready()) {
+                // Auto-initialize SSL context for HTTP/3
+                if (!port->ssl_context) {
+                    if (!port->ssl_context_init()) {
+                        swoole_warning("failed to initialize SSL context for HTTP/3 on port %d", port->port);
+                        continue;  // Skip this port, try next one
+                    }
+                }
+
+                // Initialize SSL context (create SSL_CTX)
+                if (!port->get_ssl_cert_file().empty()) {
+                    if (!port->ssl_init()) {
+                        swoole_warning("failed to initialize SSL for HTTP/3 on port %d. "
+                                      "Make sure ssl_cert_file and ssl_key_file are configured.", port->port);
+                        continue;  // Skip this port, try next one
+                    }
+                    swoole_trace_log(SW_TRACE_SERVER, "SSL context initialized for HTTP/3 on port %d", port->port);
+                }
+            }
+
             swoole::http3::Server *h3_server = new swoole::http3::Server();
             if (!h3_server) {
                 swoole_error_log(SW_LOG_ERROR, SW_ERROR_SYSTEM_CALL_FAIL, "failed to create HTTP/3 server");

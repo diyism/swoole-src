@@ -145,6 +145,7 @@ namespace swoole {
 #define HTTP2_H2_ALPN "\x02h2"
 #define HTTP2_H2_16_ALPN "\x05h2-16"
 #define HTTP2_H2_14_ALPN "\x05h2-14"
+#define HTTP3_H3_ALPN "\x02h3"  // Phase 7.6: HTTP/3 ALPN
 #define HTTP1_NPN "\x08http/1.1"
 
 #define ssl_error(_fmt, ...)                                                                                           \
@@ -157,7 +158,12 @@ static int ssl_alpn_advertised(SSL *ssl, const uchar **out, uchar *outlen, const
     const char *protos;
 
     auto *cfg = (SSLContext *) arg;
-    if (cfg->http_v2) {
+    // Phase 7.6: Add HTTP/3 ALPN support
+    if (cfg->http_v3) {
+        // HTTP/3 includes h3, h2, and http/1.1
+        protos = HTTP3_H3_ALPN HTTP2_H2_ALPN HTTP1_NPN;
+        protos_len = sizeof(HTTP3_H3_ALPN HTTP2_H2_ALPN HTTP1_NPN) - 1;
+    } else if (cfg->http_v2) {
         protos = HTTP2_H2_ALPN HTTP1_NPN;
         protos_len = sizeof(HTTP2_H2_ALPN HTTP1_NPN) - 1;
     } else {
@@ -292,6 +298,14 @@ bool SSLContext::create() {
     }
 #endif
 
+    // Phase 7.6: Enable QUIC support for HTTP/3
+#if defined(SSL_OP_ENABLE_QUIC) && defined(SW_USE_HTTP3)
+    if (http_v3) {
+        SSL_CTX_set_options(context, SSL_OP_ENABLE_QUIC);
+        swoole_trace_log(SW_TRACE_SSL, "SSL_OP_ENABLE_QUIC set for HTTP/3");
+    }
+#endif
+
 #ifdef SSL_MODE_RELEASE_BUFFERS
     SSL_CTX_set_mode(context, SSL_MODE_RELEASE_BUFFERS);
 #endif
@@ -360,10 +374,14 @@ bool SSLContext::create() {
         SSL_CTX_set_verify(context, SSL_VERIFY_NONE, nullptr);
     }
 
-    if (http || http_v2) {
+    // Phase 7.6: Add HTTP/3 ALPN support
+    if (http || http_v2 || http_v3) {
         unsigned int protos_len;
         const char *protos;
-        if (http_v2) {
+        if (http_v3) {
+            protos = HTTP3_H3_ALPN HTTP2_H2_ALPN HTTP1_NPN;
+            protos_len = sizeof(HTTP3_H3_ALPN HTTP2_H2_ALPN HTTP1_NPN) - 1;
+        } else if (http_v2) {
             protos = HTTP2_H2_ALPN HTTP1_NPN;
             protos_len = sizeof(HTTP2_H2_ALPN HTTP1_NPN) - 1;
         } else {
