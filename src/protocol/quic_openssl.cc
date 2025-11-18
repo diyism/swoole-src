@@ -696,7 +696,7 @@ swoole::Connection* Listener::create_swoole_connection(Connection *qc) {
     // Find the ListenPort for this listener
     swoole::ListenPort *port = nullptr;
     for (auto ls : swoole_server->ports) {
-        if (ls->socket->fd == udp_fd) {
+        if (ls && ls->socket && ls->socket->fd == udp_fd) {
             port = ls;
             break;
         }
