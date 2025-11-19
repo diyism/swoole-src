@@ -574,6 +574,9 @@ void Listener::run() {
 // ============================================================================
 
 bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
+    swoole_warning("[DEBUG] register_to_reactor: reactor=%p, ssl_listener=%p, udp_fd=%d",
+                   _reactor, ssl_listener, udp_fd);
+
     if (!_reactor) {
         swoole_warning("Reactor is null");
         return false;
@@ -591,6 +594,7 @@ bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
     }
 
     // Set socket to non-blocking mode
+    swoole_warning("[DEBUG] Setting UDP fd=%d to non-blocking mode", udp_fd);
     int flags = fcntl(udp_fd, F_GETFL, 0);
     if (fcntl(udp_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         swoole_sys_warning("fcntl(O_NONBLOCK) failed");
@@ -598,6 +602,7 @@ bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
     }
 
     // Create Swoole Socket wrapper
+    swoole_warning("[DEBUG] Creating Swoole Socket wrapper for fd=%d", udp_fd);
     swoole_socket = new swoole::network::Socket();
     if (!swoole_socket) {
         swoole_warning("Failed to create Swoole Socket");
@@ -610,11 +615,16 @@ bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
     swoole_socket->object = this;  // Bind Listener to socket
     swoole_socket->set_nonblock();
 
+    swoole_warning("[DEBUG] Setting reactor handler for SW_FD_DGRAM_SERVER");
     // Set handler for QUIC UDP socket
     _reactor->set_handler(SW_FD_DGRAM_SERVER, SW_EVENT_READ, on_reactor_read);
 
     // Register to Reactor for read events
-    if (_reactor->add(swoole_socket, SW_EVENT_READ) < 0) {
+    swoole_warning("[DEBUG] Calling reactor->add(socket, SW_EVENT_READ), fd=%d", udp_fd);
+    int add_result = _reactor->add(swoole_socket, SW_EVENT_READ);
+    swoole_warning("[DEBUG] reactor->add() returned: %d", add_result);
+
+    if (add_result < 0) {
         swoole_warning("Failed to add QUIC socket to reactor");
         delete swoole_socket;
         swoole_socket = nullptr;
@@ -624,6 +634,7 @@ bool Listener::register_to_reactor(swoole::Reactor *_reactor) {
     reactor = _reactor;
     reactor_registered = true;
 
+    swoole_warning("[DEBUG] QUIC Listener successfully registered to Reactor, fd=%d", udp_fd);
     swoole_trace_log(SW_TRACE_QUIC, "QUIC Listener registered to Reactor, fd=%d", udp_fd);
     return true;
 }
