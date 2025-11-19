@@ -796,11 +796,16 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
 
 #ifdef SW_USE_HTTP3
     // Phase 7.2/7.5: Register HTTP/3 QUIC listener to Reactor
+    swoole_warning("[DEBUG] Checking HTTP/3 registration: private_data_1=%p, reactor_id=%d",
+                   serv->private_data_1, reactor_id);
     if (serv->private_data_1 && reactor_id == 0) {  // Only register in first reactor thread
+        swoole_warning("[DEBUG] Registering HTTP/3 to reactor...");
         swoole::http3::Server *h3_server = (swoole::http3::Server *) serv->private_data_1;
 
         // Find the primary port with HTTP/3 enabled
         for (auto ls : serv->ports) {
+            swoole_warning("[DEBUG] Checking port %d, open_http3_protocol=%d",
+                           ls->port, ls->open_http3_protocol);
             if (!ls->open_http3_protocol) {
                 continue;
             }
@@ -825,17 +830,21 @@ int ReactorThread::init(Server *serv, Reactor *reactor, uint16_t reactor_id) {
             const char *host_str = ls->host.empty() ? "0.0.0.0" : ls->host.c_str();
 
             // Bind QUIC listener (creates QUIC-specific SSL context internally)
+            swoole_warning("[DEBUG] Binding HTTP/3 server to %s:%d", host_str, ls->port);
             if (!h3_server->bind(host_str, ls->port, cert_file, key_file)) {
                 swoole_warning("Failed to bind HTTP/3 server to %s:%d. HTTP/3 will be disabled.", host_str, ls->port);
                 break;  // Skip HTTP/3, but don't fail server start
             }
+            swoole_warning("[DEBUG] HTTP/3 bind succeeded, quic_server=%p", h3_server->quic_server);
 
             // Register to Reactor
+            swoole_warning("[DEBUG] Calling register_to_reactor, reactor=%p", reactor);
             if (!h3_server->quic_server->register_to_reactor(reactor)) {
                 swoole_warning("Failed to register HTTP/3 listener to reactor. HTTP/3 will be disabled.");
                 break;  // Skip HTTP/3, but don't fail server start
             }
 
+            swoole_warning("[DEBUG] HTTP/3 listener registered successfully on %s:%d", host_str, ls->port);
             swoole_trace_log(SW_TRACE_SERVER, "HTTP/3 listener registered on %s:%d", host_str, ls->port);
             break;  // Only register first HTTP/3 port
         }

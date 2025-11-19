@@ -325,9 +325,11 @@ bool Listener::listen(const struct sockaddr *addr, socklen_t addrlen) {
         return false;
     }
 
+    swoole_warning("[DEBUG] UDP socket bound successfully (fd=%d)", udp_fd);
     swoole_trace_log(SW_TRACE_QUIC, "UDP socket bound successfully (fd=%d)", udp_fd);
 
     // Step 3: Create QUIC listener
+    swoole_warning("[DEBUG] Creating QUIC listener with SSL_new_listener, ssl_ctx=%p", ssl_ctx);
     ssl_listener = SSL_new_listener(ssl_ctx, 0);
     if (!ssl_listener) {
         swoole_error_log(SW_ERROR_SSL_BAD_PROTOCOL, SW_ERROR_SYSTEM_CALL_FAIL,
@@ -337,8 +339,10 @@ bool Listener::listen(const struct sockaddr *addr, socklen_t addrlen) {
         udp_fd = -1;
         return false;
     }
+    swoole_warning("[DEBUG] SSL_new_listener succeeded: %p", ssl_listener);
 
     // Step 4: Attach UDP socket to SSL listener
+    swoole_warning("[DEBUG] Attaching UDP fd=%d to SSL listener", udp_fd);
     if (!SSL_set_fd(ssl_listener, udp_fd)) {
         swoole_error_log(SW_ERROR_SSL_BAD_PROTOCOL, SW_ERROR_SYSTEM_CALL_FAIL,
                         "SSL_set_fd failed");
@@ -349,8 +353,10 @@ bool Listener::listen(const struct sockaddr *addr, socklen_t addrlen) {
         udp_fd = -1;
         return false;
     }
+    swoole_warning("[DEBUG] SSL_set_fd succeeded");
 
     // Step 5: Start listening for QUIC connections
+    swoole_warning("[DEBUG] Calling SSL_listen...");
     if (!SSL_listen(ssl_listener)) {
         swoole_error_log(SW_ERROR_SSL_BAD_PROTOCOL, SW_ERROR_SYSTEM_CALL_FAIL,
                         "SSL_listen failed");
@@ -362,6 +368,7 @@ bool Listener::listen(const struct sockaddr *addr, socklen_t addrlen) {
         return false;
     }
 
+    swoole_warning("[DEBUG] SSL_listen succeeded! QUIC listener is ready");
     swoole_trace_log(SW_TRACE_QUIC, "QUIC listener ready and listening");
     return true;
 }
@@ -372,32 +379,45 @@ Connection* Listener::accept_connection() {
         return nullptr;
     }
 
+    swoole_warning("[DEBUG] accept_connection: ssl_listener=%p, udp_fd=%d", ssl_listener, udp_fd);
     ERR_clear_error();
 
     // Accept incoming connection
+    swoole_warning("[DEBUG] Calling SSL_accept_connection...");
     SSL *conn_ssl = SSL_accept_connection(ssl_listener, 0);
+    swoole_warning("[DEBUG] SSL_accept_connection returned: %p", conn_ssl);
+
     if (!conn_ssl) {
         unsigned long err = ERR_peek_last_error();
+        swoole_warning("[DEBUG] SSL_accept_connection failed, error code: 0x%lx", err);
+
         if (err == 0) {  // No error, just no connection pending
             // No connection available, this is normal
+            swoole_warning("[DEBUG] No connection pending (normal)");
             return nullptr;
         }
 
         // Real error
+        char err_buf[256];
+        ERR_error_string_n(err, err_buf, sizeof(err_buf));
         swoole_error_log(SW_ERROR_SSL_BAD_PROTOCOL, SW_ERROR_SYSTEM_CALL_FAIL,
-                        "SSL_accept_connection failed");
+                        "SSL_accept_connection failed: %s", err_buf);
         ERR_print_errors_fp(stderr);
         return nullptr;
     }
 
+    swoole_warning("[DEBUG] Connection SSL object created, initializing Connection...");
+
     // Create new Connection object
     Connection *new_conn = new Connection();
     if (!new_conn->init_from_ssl(conn_ssl, ssl_ctx)) {
+        swoole_warning("[DEBUG] Failed to init Connection from SSL");
         delete new_conn;
         SSL_free(conn_ssl);
         return nullptr;
     }
 
+    swoole_warning("[DEBUG] Connection accepted successfully!");
     swoole_trace_log(SW_TRACE_QUIC, "Connection accepted");
 
     // Trigger callback if set
@@ -869,10 +889,12 @@ int Listener::on_reactor_read(swoole::Reactor *reactor, swoole::Event *event) {
         return SW_ERR;
     }
 
+    swoole_warning("[DEBUG] Reactor read event: fd=%d, processing QUIC packets", socket->fd);
     swoole_trace_log(SW_TRACE_QUIC, "Reactor read event: processing QUIC packets");
 
     // Process incoming packet (may accept new connection)
-    listener->process_packet();
+    bool packet_processed = listener->process_packet();
+    swoole_warning("[DEBUG] process_packet returned: %d", packet_processed);
 
     // Process all active connections
     listener->process_connections();
